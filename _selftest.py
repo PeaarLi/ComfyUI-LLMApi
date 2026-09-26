@@ -27,7 +27,9 @@ import importlib.util
 import io as io_module
 import json
 import py_compile
+import shutil
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -43,6 +45,51 @@ for path in (str(COMFY_ROOT), str(PACK_DIR)):
 
 import torch  # noqa: E402  (after sys.path setup)
 from PIL import Image  # noqa: E402
+
+# Per-node expectations, so the schema and locale sections are table-driven
+# instead of hardcoding one node's shape. A node registered without a row here
+# fails the "ALL_NODES matches the expected node set" check, so the table cannot
+# silently fall behind the pack.
+NODE_EXPECTATIONS: dict[str, dict] = {
+    "LlmApiChat": {
+        "display_name": "LLM API Chat",
+        "category": "text/llm api",
+        "inputs": [
+            "prompt",
+            "model",
+            "base_url",
+            "api_key",
+            "system_prompt",
+            "images",
+            "seed",
+            "temperature",
+            "max_tokens",
+            "timeout",
+            "max_retries",
+        ],
+    },
+    "LlmApiAnthropic": {
+        "display_name": "LLM API Anthropic",
+        "category": "text/llm api",
+        "inputs": [
+            "prompt",
+            "model",
+            "base_url",
+            "api_key",
+            "auth_style",
+            "anthropic_version",
+            "system_prompt",
+            "skill",
+            "images",
+            "reasoning_trace",
+            "native_skills",
+            "max_tokens",
+            "temperature",
+            "timeout",
+            "max_retries",
+        ],
+    },
+}
 
 _FAILURES: list[str] = []
 _PASSES = 0
@@ -120,7 +167,15 @@ def section_pack(pack) -> type:
     check("ALL_NODES is non-empty", bool(getattr(pack, "ALL_NODES", None)))
 
     nodes = list(pack.ALL_NODES)
-    check("ALL_NODES has exactly one node", len(nodes) == 1, f"got {[n.__name__ for n in nodes]}")
+    registered = [node.__name__ for node in nodes]
+    # Set equality rather than a count: a node registered without a row in
+    # NODE_EXPECTATIONS would otherwise be skipped silently by every section
+    # below, which is the one way this suite could pass while covering nothing.
+    check(
+        "ALL_NODES matches the expected node set",
+        set(registered) == set(NODE_EXPECTATIONS),
+        f"got {registered}, expected {sorted(NODE_EXPECTATIONS)}",
+    )
 
     # GET_SCHEMA is the call the loader makes (nodes.py: for node_cls in node_list:
     # schema = node_cls.GET_SCHEMA()). Calling it here surfaces import-time
@@ -132,138 +187,213 @@ def section_pack(pack) -> type:
             check(f"{node_cls.__name__}.GET_SCHEMA()", False, f"{type(exc).__name__}: {exc}")
         else:
             check(f"{node_cls.__name__}.GET_SCHEMA()", schema is not None)
-    return nodes[0]
+    return {node.__name__: node for node in nodes}
 
 
-def section_schema(node_cls) -> None:
+def section_schema(nodes: dict) -> None:
     section("schema")
-    schema = node_cls.GET_SCHEMA()
-    check("node_id", schema.node_id == "LlmApiChat", f"got {schema.node_id!r}")
-    check("display_name", schema.display_name == "LLM API Chat", f"got {schema.display_name!r}")
-    check("category", schema.category == "text/llm api", f"got {schema.category!r}")
+    for node_id, expected in NODE_EXPECTATIONS.items():
+        node_cls = nodes.get(node_id)
+        if not check(f"{node_id}: registered", node_cls is not None):
+            continue
+        schema = node_cls.GET_SCHEMA()
+        check(f"{node_id}: node_id", schema.node_id == node_id, f"got {schema.node_id!r}")
+        check(
+            f"{node_id}: display_name",
+            schema.display_name == expected["display_name"],
+            f"got {schema.display_name!r}",
+        )
+        check(f"{node_id}: category", schema.category == expected["category"], f"got {schema.category!r}")
 
-    expected_inputs = [
-        "prompt",
-        "model",
-        "base_url",
-        "api_key",
-        "system_prompt",
-        "images",
-        "seed",
-        "temperature",
-        "max_tokens",
-        "timeout",
-        "max_retries",
-    ]
-    got_inputs = [item.id for item in schema.inputs]
-    check("input ids match exactly", got_inputs == expected_inputs, f"got {got_inputs}")
+        got_inputs = [item.id for item in schema.inputs]
+        check(f"{node_id}: input ids match exactly", got_inputs == expected["inputs"], f"got {got_inputs}")
 
-    check("exactly two outputs", len(schema.outputs) == 2, f"got {len(schema.outputs)}")
-    for index, output in enumerate(schema.outputs):
-        # io_type is the wire type ComfyUI routes on; the Python class of the
-        # Output wrapper is the same generic class for every type.
-        check(f"output {index} is STRING", output.io_type == "STRING", f"got {output.io_type!r}")
-        check(f"output {index} has a display_name", bool((output.display_name or "").strip()))
-        check(f"output {index} has a tooltip", bool((output.tooltip or "").strip()))
+        check(f"{node_id}: exactly two outputs", len(schema.outputs) == 2, f"got {len(schema.outputs)}")
+        for index, output in enumerate(schema.outputs):
+            # io_type is the wire type ComfyUI routes on; the Python class of the
+            # Output wrapper is the same generic class for every type.
+            check(f"{node_id}: output {index} is STRING", output.io_type == "STRING", f"got {output.io_type!r}")
+            check(f"{node_id}: output {index} has a display_name", bool((output.display_name or "").strip()))
+            check(f"{node_id}: output {index} has a tooltip", bool((output.tooltip or "").strip()))
 
-    # The Autogrow image slots must not leak into schema.inputs as separate
-    # entries -- they are a single dict-typed input. If this ever changes, the
-    # locale assertion below and the execute signature both need revisiting.
+        blank = [item.id for item in schema.inputs if not (item.tooltip or "").strip()]
+        check(f"{node_id}: every input carries a tooltip", not blank, f"blank on {blank}")
+
+        # Required-ness is part of the API contract rather than a detail: an input
+        # in `required` must be present in an API-submitted prompt, so marking
+        # everything required forces a script to restate all 11/15 fields even
+        # though every one of them has a default. Core's own V3 API nodes put
+        # their secondary parameters in `optional`; this pins the same split.
+        required = {item.id for item in schema.inputs if not getattr(item, "optional", False)}
+        check(
+            f"{node_id}: only prompt and model are required",
+            required == {"prompt", "model"},
+            f"got {sorted(required)} -- everything else has a default and should be optional",
+        )
+
+        # The Autogrow image slots must not leak into schema.inputs as separate
+        # entries -- they are a single dict-typed input. If this ever changes, the
+        # locale assertion below and the execute signature both need revisiting.
+        check(
+            f"{node_id}: images is a single input, not expanded into slots",
+            "images" in got_inputs and not any(name.startswith("image_") for name in got_inputs),
+            f"got {got_inputs}",
+        )
+
+
+def section_defaults() -> None:
+    section("module constants")
+    chat = importlib.import_module(f"{PACK_NAME}.nodes.chat")
+    check("chat.DEFAULT_BASE_URL", chat.DEFAULT_BASE_URL == "https://api.openai.com/v1")
+    check("chat temperature sentinel is negative", chat.DEFAULT_TEMPERATURE < 0)
+    check("chat max_tokens sentinel omits the field", chat.DEFAULT_MAX_TOKENS == 0)
+    check("chat seed sentinel omits the field", chat.DEFAULT_SEED == 0)
+    check("chat MAX_IMAGES within engine limit", 0 < chat.MAX_IMAGES <= 100, f"got {chat.MAX_IMAGES}")
+
+    anthropic = importlib.import_module(f"{PACK_NAME}.nodes.anthropic")
+    check("anthropic.DEFAULT_BASE_URL", anthropic.DEFAULT_BASE_URL == "https://api.anthropic.com")
+    check("anthropic temperature sentinel is negative", anthropic.DEFAULT_TEMPERATURE < 0)
+    # The opposite of the sibling node's convention, and the difference is
+    # deliberate: Anthropic requires max_tokens, so there is no omit sentinel and
+    # the default has to be a real value.
     check(
-        "images is a single input, not expanded into slots",
-        "images" in got_inputs and not any(name.startswith("image_") for name in got_inputs),
-        f"got {got_inputs}",
+        "anthropic max_tokens has no omit sentinel",
+        anthropic.DEFAULT_MAX_TOKENS >= anthropic.MAX_TOKENS_MIN,
+        f"got {anthropic.DEFAULT_MAX_TOKENS}",
+    )
+    check(
+        "anthropic temperature range tops out at 1, not the OpenAI node's 2",
+        anthropic.TEMPERATURE_MAX == 1.0,
+        f"got {anthropic.TEMPERATURE_MAX}",
+    )
+    check("anthropic MAX_IMAGES within engine limit", 0 < anthropic.MAX_IMAGES <= 100, f"got {anthropic.MAX_IMAGES}")
+    check(
+        "anthropic skill options lead with the none sentinel",
+        anthropic.SKILL_OPTIONS[:1] == ["(none)"],
+        f"got {anthropic.SKILL_OPTIONS}",
+    )
+    check(
+        "anthropic bundled skills were discovered",
+        len(anthropic.SKILLS) >= 1,
+        f"got {[s.name for s in anthropic.SKILLS]} - is skills/ populated and committed?",
     )
 
-    module = importlib.import_module(f"{PACK_NAME}.nodes.chat")
-    check("DEFAULT_BASE_URL", module.DEFAULT_BASE_URL == "https://api.openai.com/v1")
-    check("temperature sentinel is negative", module.DEFAULT_TEMPERATURE < 0)
-    check("max_tokens sentinel omits the field", module.DEFAULT_MAX_TOKENS == 0)
-    check("seed sentinel omits the field", module.DEFAULT_SEED == 0)
-    check("MAX_IMAGES within engine limit", 0 < module.MAX_IMAGES <= 100, f"got {module.MAX_IMAGES}")
 
-
-def section_autogrow(node_cls) -> None:
+def section_autogrow(nodes: dict) -> None:
     section("Autogrow image slots")
     from comfy_api.latest import io
 
-    schema = node_cls.GET_SCHEMA()
-    images = next((item for item in schema.inputs if item.id == "images"), None)
-    if not check("images input is present", images is not None):
-        return
-    if not check("images is an Autogrow input", isinstance(images, io.Autogrow.Input), f"got {type(images).__name__}"):
-        return
+    defs_source = (PACK_DIR / "locales" / "zh" / "nodeDefs.json").read_text(encoding="utf-8")
+    for node_id, node_cls in sorted(nodes.items()):
+        schema = node_cls.GET_SCHEMA()
+        images = next((item for item in schema.inputs if item.id == "images"), None)
+        if not check(f"{node_id}: images input is present", images is not None):
+            continue
+        if not check(
+            f"{node_id}: images is an Autogrow input",
+            isinstance(images, io.Autogrow.Input),
+            f"got {type(images).__name__}",
+        ):
+            continue
 
-    template = images.template
-    check("template is TemplateNames", isinstance(template, io.Autogrow.TemplateNames), f"got {type(template).__name__}")
-    check("template min is 0, so no slot is required", getattr(template, "min", None) == 0, f"got {getattr(template, 'min', None)}")
-    names = list(getattr(template, "names", []))
-    check("slot count matches IMAGE_SLOT_NAMES", names == [f"image_{i}" for i in range(1, len(names) + 1)], f"got {names}")
-    check("slots are numbered from image_1", names[:1] == ["image_1"], f"got {names[:1]}")
-    check("slot names are unique", len(names) == len(set(names)))
+        template = images.template
+        check(
+            f"{node_id}: template is TemplateNames",
+            isinstance(template, io.Autogrow.TemplateNames),
+            f"got {type(template).__name__}",
+        )
+        check(
+            f"{node_id}: template min is 0, so no slot is required",
+            getattr(template, "min", None) == 0,
+            f"got {getattr(template, 'min', None)}",
+        )
+        names = list(getattr(template, "names", []))
+        check(
+            f"{node_id}: slot count matches the declared names",
+            names == [f"image_{i}" for i in range(1, len(names) + 1)],
+            f"got {names}",
+        )
+        check(f"{node_id}: slots are numbered from image_1", names[:1] == ["image_1"], f"got {names[:1]}")
+        check(f"{node_id}: slot names are unique", len(names) == len(set(names)))
 
-    # Load-bearing: the frontend resolves a child slot as "images_image_1" and
-    # falls back to this backend string when the locale has no such key. Empty
-    # here means a blank tooltip on every image slot, in every language.
-    inner_tooltip = getattr(getattr(template, "input", None), "tooltip", None)
+        # Load-bearing, and true for every node that has image slots: the frontend
+        # resolves a child slot as "images_image_1" and falls back to this backend
+        # string when the locale has no such key. Empty here means a blank tooltip
+        # on every image slot, in every language.
+        inner_tooltip = getattr(getattr(template, "input", None), "tooltip", None)
+        check(
+            f"{node_id}: the template's inner input carries a tooltip",
+            bool((inner_tooltip or "").strip()),
+            "locales/zh cannot override this one; the frontend falls back to it for every child slot",
+        )
+
     check(
-        "the template's inner input carries a tooltip",
-        bool((inner_tooltip or "").strip()),
-        "locales/zh cannot override this one; the frontend falls back to it for every child slot",
-    )
-    check(
-        "the child slot tooltip is not duplicated in the locale",
-        "images_image_1" not in (PACK_DIR / "locales" / "zh" / "nodeDefs.json").read_text(encoding="utf-8"),
-        "a locale key here is dead: the frontend looks up images_image_1 but the backend string wins",
+        "no image-slot locale key exists anywhere (they would be dead keys)",
+        "images_image_1" not in defs_source,
+        "the frontend looks up images_image_1 but the backend string wins, so such a key does nothing",
     )
 
 
-def section_locale(node_cls) -> None:
+def section_locale(nodes: dict) -> None:
     section("locale (zh)")
-    schema = node_cls.GET_SCHEMA()
     main_path = PACK_DIR / "locales" / "zh" / "main.json"
     defs_path = PACK_DIR / "locales" / "zh" / "nodeDefs.json"
     if not check("main.json exists", main_path.is_file()) or not check("nodeDefs.json exists", defs_path.is_file()):
         return
 
-    main = json.loads(main_path.read_text(encoding="utf-8"))
-    categories = main.get("nodeCategories", {})
+    categories = json.loads(main_path.read_text(encoding="utf-8")).get("nodeCategories", {})
+    for category in sorted({expected["category"] for expected in NODE_EXPECTATIONS.values()}):
+        # The key is the LAST segment of the category path, not the whole path.
+        tail = category.split("/")[-1]
+        check(
+            f"main.json translates category {tail!r}",
+            categories.get(tail) not in (None, ""),
+            f"nodeCategories={categories!r}; category was {category!r}",
+        )
+
+    specs = json.loads(defs_path.read_text(encoding="utf-8"))
     check(
-        "main.json translates the category",
-        categories.get("llm api") not in (None, ""),
-        f"nodeCategories={categories!r}; the key is the LAST segment of category='text/llm api'",
+        "nodeDefs.json has an entry for exactly the registered nodes",
+        set(specs) == set(NODE_EXPECTATIONS),
+        f"missing={sorted(set(NODE_EXPECTATIONS) - set(specs))} dead={sorted(set(specs) - set(NODE_EXPECTATIONS))}",
     )
 
-    spec = json.loads(defs_path.read_text(encoding="utf-8")).get(schema.node_id)
-    if not check("nodeDefs.json has an entry for the node_id", isinstance(spec, dict)):
-        return
+    for node_id, node_cls in sorted(nodes.items()):
+        schema = node_cls.GET_SCHEMA()
+        spec = specs.get(node_id)
+        if not check(f"{node_id}: nodeDefs entry exists", isinstance(spec, dict)):
+            continue
 
-    for field in ("display_name", "description"):
-        check(f"{field} is non-empty", bool(str(spec.get(field, "")).strip()), f"got {spec.get(field)!r}")
+        for field in ("display_name", "description"):
+            check(
+                f"{node_id}: {field} is non-empty",
+                bool(str(spec.get(field, "")).strip()),
+                f"got {spec.get(field)!r}",
+            )
 
-    # Exact equality, not "at least": a stale key left behind after a parameter
-    # is renamed shows up as a blank tooltip in the UI and is very hard to spot.
-    expected_inputs = {item.id for item in schema.inputs}
-    got_inputs = set(spec.get("inputs", {}))
-    check(
-        "locale input keys match the schema exactly",
-        got_inputs == expected_inputs,
-        f"missing={sorted(expected_inputs - got_inputs)} dead={sorted(got_inputs - expected_inputs)}",
-    )
+        # Exact equality, not "at least": a stale key left behind after a parameter
+        # is renamed shows up as a blank tooltip in the UI and is very hard to spot.
+        expected_inputs = {item.id for item in schema.inputs}
+        got_inputs = set(spec.get("inputs", {}))
+        check(
+            f"{node_id}: locale input keys match the schema exactly",
+            got_inputs == expected_inputs,
+            f"missing={sorted(expected_inputs - got_inputs)} dead={sorted(got_inputs - expected_inputs)}",
+        )
 
-    expected_outputs = {str(index) for index in range(len(schema.outputs))}
-    got_outputs = set(spec.get("outputs", {}))
-    check(
-        "locale output keys are the positional indices",
-        got_outputs == expected_outputs,
-        f"missing={sorted(expected_outputs - got_outputs)} dead={sorted(got_outputs - expected_outputs)}",
-    )
+        expected_outputs = {str(index) for index in range(len(schema.outputs))}
+        got_outputs = set(spec.get("outputs", {}))
+        check(
+            f"{node_id}: locale output keys are the positional indices",
+            got_outputs == expected_outputs,
+            f"missing={sorted(expected_outputs - got_outputs)} dead={sorted(got_outputs - expected_outputs)}",
+        )
 
-    for group, keys in (("inputs", expected_inputs), ("outputs", expected_outputs)):
-        for key in sorted(keys & set(spec.get(group, {}))):
-            entry = spec[group][key]
-            check(f"{group}.{key} has a name", bool(str(entry.get("name", "")).strip()))
-            check(f"{group}.{key} has a tooltip", bool(str(entry.get("tooltip", "")).strip()))
+        for group, keys in (("inputs", expected_inputs), ("outputs", expected_outputs)):
+            for key in sorted(keys & set(spec.get(group, {}))):
+                entry = spec[group][key]
+                check(f"{node_id}: {group}.{key} has a name", bool(str(entry.get("name", "")).strip()))
+                check(f"{node_id}: {group}.{key} has a tooltip", bool(str(entry.get("tooltip", "")).strip()))
 
 
 def section_dependencies() -> None:
@@ -386,6 +516,17 @@ class _StubServer(ThreadingHTTPServer):
         self._scripted = list(responses)
         self.requests.clear()
 
+    def handle_error(self, request, client_address) -> None:
+        """Stay quiet when a client walks away mid-request.
+
+        The timeout tests deliberately abandon a request, and Windows reports the
+        resulting teardown as ConnectionAbortedError, which socketserver would
+        otherwise print as a traceback. Real stub bugs still surface.
+        """
+        if isinstance(sys.exc_info()[1], (ConnectionError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
     def next_response(self) -> tuple:
         if self._scripted:
             entry = self._scripted.pop(0)
@@ -444,7 +585,8 @@ def section_http(node_cls, node_module) -> None:
     client = importlib.import_module(f"{PACK_NAME}.nodes._client")
     # Keep the retry test fast: this is a module constant precisely so a test can
     # shorten it, and the backoff schedule itself is not what is under test.
-    client._RETRY_BASE_DELAY = 0.01
+    # It lives on the shared transport now, which both provider nodes use.
+    importlib.import_module(f"{PACK_NAME}.nodes._transport")._RETRY_BASE_DELAY = 0.01
 
     server = _StubServer(("127.0.0.1", 0), _StubHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -752,6 +894,471 @@ def section_http(node_cls, node_module) -> None:
         server.server_close()
 
 
+def section_skills() -> None:
+    section("skill loading (skills/<name>/SKILL.md)")
+    skills = importlib.import_module(f"{PACK_NAME}.nodes._skills")
+
+    root = skills._skills_root()
+    check("skills/ directory exists", root.is_dir(), f"looked in {root}")
+    bundled = skills._discover_skills()
+    check("bundled skills were discovered", len(bundled) >= 1, f"got {[s.name for s in bundled]}")
+    for skill in bundled:
+        check(f"{skill.name}: manifest name matches its directory", skill.manifest.parent.name == skill.name)
+        check(f"{skill.name}: description is non-empty", bool(skill.description.strip()))
+        body = skills._load_skill_body(skill.name)
+        check(f"{skill.name}: body loads", bool(body.strip()))
+        check(f"{skill.name}: frontmatter is stripped from the body", not body.lstrip().startswith("---"))
+        check(f"{skill.name}: body keeps its heading", body.lstrip().startswith("#"))
+
+    check("the none sentinel loads nothing", skills._load_skill_body(skills._NO_SKILL) == "")
+    check("an empty name loads nothing", skills._load_skill_body("") == "")
+    try:
+        skills._load_skill_body("no-such-skill")
+    except ValueError as exc:
+        message = str(exc)
+        check("an unknown skill raises", "no-such-skill" in message, f"got {message}")
+        check("...and lists what is available", "image-prompt-enhancer" in message, f"got {message}")
+    else:
+        check("an unknown skill raises", False, "no exception raised")
+
+    # The failure modes, each in its own throwaway directory. These are the cases a
+    # user hits by hand-editing a SKILL.md, and the difference between "skipped
+    # with a warning" and "raises" is the whole discovery/loading split.
+    good = "---\nname: good\ndescription: A well-formed skill.\n---\n\n# Good\n\nBody text.\n"
+    cases = {
+        "good": (good, "ok"),
+        "block-scalar": (
+            "---\nname: block\ndescription: |\n  Multi-line description,\n  which is why this parser is PyYAML.\n---\n# B\n\nBody.\n",
+            "ok",
+        ),
+        "no-description": ("---\nname: nodesc\n---\n\n# X\n\nBody.\n", "raise"),
+        "no-frontmatter": ("# Just a heading\n\nBody.\n", "raise"),
+        "unterminated": ("---\nname: u\ndescription: d\n\n# never closed\n", "raise"),
+        "frontmatter-only": ("---\nname: e\ndescription: d\n---\n\n\n", "raise"),
+    }
+    for name, (content, expectation) in cases.items():
+        scratch = Path(tempfile.mkdtemp(prefix=f"llmapi-skill-{name}-"))
+        try:
+            manifest = scratch / name / "SKILL.md"
+            manifest.parent.mkdir(parents=True, exist_ok=True)
+            manifest.write_text(content, encoding="utf-8")
+
+            discovered = [skill.name for skill in skills._discover_skills(scratch)]
+            try:
+                skills._load_skill_body(name, scratch)
+            except ValueError:
+                raised = True
+            else:
+                raised = False
+
+            if expectation == "ok":
+                check(f"{name}: discovered", discovered == [name], f"got {discovered}")
+                check(f"{name}: loads without error", not raised)
+            else:
+                # Tolerant discovery, strict loading -- the two halves of the split.
+                check(f"{name}: skipped by discovery rather than killing it", discovered == [], f"got {discovered}")
+                check(f"{name}: raises when actually loaded", raised)
+        finally:
+            shutil.rmtree(scratch, ignore_errors=True)
+
+    # A directory with no manifest, and a loose file, are both skipped quietly.
+    scratch = Path(tempfile.mkdtemp(prefix="llmapi-skill-shape-"))
+    try:
+        (scratch / "manifestless").mkdir()
+        (scratch / "manifestless" / "notes.md").write_text("x", encoding="utf-8")
+        (scratch / ".gitkeep").write_text("", encoding="utf-8")
+        check(
+            "a directory without SKILL.md and a loose file are both ignored",
+            skills._discover_skills(scratch) == [],
+            f"got {[s.name for s in skills._discover_skills(scratch)]}",
+        )
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
+def section_anthropic_url() -> None:
+    section("Anthropic URL joining")
+    client = importlib.import_module(f"{PACK_NAME}.nodes._anthropic_client")
+
+    cases = [
+        ("https://api.anthropic.com", "https://api.anthropic.com/v1/messages"),
+        ("https://api.anthropic.com/", "https://api.anthropic.com/v1/messages"),
+        # The shape the sibling node trains you to type. Appending "/v1/messages"
+        # blindly would give /v1/v1/messages.
+        ("https://api.anthropic.com/v1", "https://api.anthropic.com/v1/messages"),
+        ("https://api.anthropic.com/v1/", "https://api.anthropic.com/v1/messages"),
+        ("https://api.anthropic.com/v1/messages", "https://api.anthropic.com/v1/messages"),
+        ("https://api.anthropic.com/v1/messages/", "https://api.anthropic.com/v1/messages"),
+        # A relay with its own prefix on the way to the same place.
+        ("https://relay.example.com/anthropic", "https://relay.example.com/anthropic/v1/messages"),
+        # A relay that serves the path without a version segment at all.
+        ("https://relay.example.com/messages", "https://relay.example.com/messages"),
+        ("  https://relay.example.com/v1  ", "https://relay.example.com/v1/messages"),
+    ]
+    for raw, expected in cases:
+        try:
+            got = client._messages_url(raw)
+        except Exception as exc:  # noqa: BLE001
+            check(f"messages_url({raw!r})", False, f"raised {type(exc).__name__}: {exc}")
+        else:
+            check(f"messages_url({raw!r}) -> {expected}", got == expected, f"got {got!r}")
+
+    for blank in ("", "   ", None):
+        try:
+            client._messages_url(blank)
+        except ValueError as exc:
+            check(f"messages_url({blank!r}) raises", "LlmApiAnthropic: " in str(exc), f"got {exc}")
+        else:
+            check(f"messages_url({blank!r}) raises", False, "no exception raised")
+
+    section("Anthropic auth headers")
+    # Only one auth header may ever be sent. Asserting "the other is absent" is the
+    # part that matters: a gateway rejecting an unexpected header is a real 401,
+    # and asserting only presence would not catch a regression that sent both.
+    x_api_key = client._auth_headers("sk-ant-abc", client._AUTH_X_API_KEY)
+    check("x-api-key style sets x-api-key", x_api_key.get("x-api-key") == "sk-ant-abc", f"got {x_api_key}")
+    check("x-api-key style sets no Authorization", "Authorization" not in x_api_key, f"got {x_api_key}")
+
+    bearer = client._auth_headers("sk-ant-abc", client._AUTH_BEARER)
+    check("bearer style sets Authorization", bearer.get("Authorization") == "Bearer sk-ant-abc", f"got {bearer}")
+    check("bearer style sets no x-api-key", "x-api-key" not in bearer, f"got {bearer}")
+
+    check("an empty key sends no auth header at all", client._auth_headers("") == {})
+    check("a whitespace key sends no auth header at all", client._auth_headers("   ") == {})
+    check("the key is stripped", client._auth_headers("  k  ") == {"x-api-key": "k"})
+    check("the two styles are the advertised option list", client._AUTH_STYLES == ["x-api-key", "Authorization: Bearer"])
+    try:
+        client._auth_headers("k", "Basic")
+    except ValueError as exc:
+        check("an unknown auth_style raises", "auth_style" in str(exc), f"got {exc}")
+    else:
+        check("an unknown auth_style raises", False, "no exception raised")
+
+    with_version = client._base_headers("2023-06-01")
+    check("the version header is sent when set", with_version.get("anthropic-version") == "2023-06-01")
+    check("Content-Type is always sent", with_version.get("Content-Type") == "application/json")
+    check("a blank version omits the header", "anthropic-version" not in client._base_headers(""))
+    check("a custom version is passed through", client._base_headers("2024-01-01")["anthropic-version"] == "2024-01-01")
+
+
+def section_anthropic_request() -> None:
+    section("Anthropic request construction")
+    client = importlib.import_module(f"{PACK_NAME}.nodes._anthropic_client")
+
+    base = {
+        "max_tokens": 4096,
+        "system": "",
+        "temperature": -1.0,
+        "reasoning_trace": False,
+        "native_entries": [],
+    }
+    messages = [{"role": "user", "content": "hi"}]
+
+    payload = client._build_payload("claude-opus-5", messages, **base)
+    check("max_tokens is always present", payload.get("max_tokens") == 4096, f"got {payload}")
+    check("stream is not sent", "stream" not in payload)
+    check("a blank system omits the parameter", "system" not in payload, f"got {payload}")
+    check("temperature -1 omits the field", "temperature" not in payload, f"got {payload}")
+    check("reasoning_trace off omits thinking", "thinking" not in payload, f"got {payload}")
+    check("no native skills means no container", "container" not in payload and "tools" not in payload, f"got {payload}")
+
+    payload = client._build_payload(
+        "claude-opus-5", messages, **{**base, "system": "be terse", "temperature": 0.0, "reasoning_trace": True}
+    )
+    check("system is a top-level parameter", payload.get("system") == "be terse", f"got {payload.get('system')!r}")
+    check(
+        "system is not smuggled into messages",
+        all(message["role"] != "system" for message in payload["messages"]),
+        f"got {payload['messages']}",
+    )
+    # temperature 0.0 is a real value and must survive; -1 is the sentinel.
+    check("temperature 0.0 is sent", payload.get("temperature") == 0.0, f"got {payload.get('temperature')!r}")
+    check(
+        "thinking asks for a summarized trace",
+        payload.get("thinking") == {"type": "adaptive", "display": "summarized"},
+        f"got {payload.get('thinking')!r} - without display=summarized the trace comes back empty",
+    )
+
+    section("Anthropic system composition")
+    check("skill and system prompt are joined", client._build_system("SKILL", "USER") == "SKILL\n\nUSER")
+    check("the skill comes first", client._build_system("SKILL", "USER").startswith("SKILL"))
+    check("a blank skill leaves the prompt alone", client._build_system("", "USER") == "USER")
+    check("a blank prompt leaves the skill alone", client._build_system("SKILL", "") == "SKILL")
+    check("both blank give an empty string", client._build_system("", "") == "")
+    check("whitespace-only parts are dropped", client._build_system("  ", " USER ") == "USER")
+
+    section("Anthropic user content")
+    check("text-only content is a plain string", client._build_user_content("hi", []) == "hi")
+    blocks = client._build_user_content("look", [("image/png", "QUJD")])
+    check("an image makes the content a block list", isinstance(blocks, list), f"got {type(blocks).__name__}")
+    check("the image block uses Anthropic's shape", blocks[0]["type"] == "image", f"got {blocks[0]!r}")
+    check(
+        "the image carries base64, not a data URI",
+        blocks[0]["source"] == {"type": "base64", "media_type": "image/png", "data": "QUJD"},
+        f"got {blocks[0]['source']!r}",
+    )
+    check("the text block follows the image", blocks[-1] == {"type": "text", "text": "look"}, f"got {blocks[-1]!r}")
+    # An image-only request is legal; an empty text block is not worth sending.
+    image_only = client._build_user_content("", [("image/png", "QUJD")])
+    check("a blank prompt adds no text block", len(image_only) == 1, f"got {image_only}")
+
+    section("Anthropic native skills")
+    entries = client._native_skill_entries("xlsx, skill_abc123")
+    check("ids are split on commas", len(entries) == 2, f"got {entries}")
+    check("a prebuilt document skill is typed anthropic", entries[0]["type"] == "anthropic", f"got {entries[0]!r}")
+    check("a minted id is typed custom", entries[1]["type"] == "custom", f"got {entries[1]!r}")
+    check("versions default to latest", all(entry["version"] == "latest" for entry in entries), f"got {entries}")
+    check("newlines separate ids too", len(client._native_skill_entries("xlsx\npptx\npdf")) == 3)
+    check("blank input yields nothing", client._native_skill_entries("") == [])
+    check("whitespace-only input yields nothing", client._native_skill_entries("  \n , ") == [])
+    try:
+        client._native_skill_entries(",".join(f"skill_{i}" for i in range(9)))
+    except ValueError as exc:
+        check("more than 8 skills is rejected locally", "8" in str(exc), f"got {exc}")
+    else:
+        check("more than 8 skills is rejected locally", False, "no exception raised")
+    check("exactly 8 skills is accepted", len(client._native_skill_entries(",".join(f"s{i}" for i in range(8)))) == 8)
+
+    payload = client._build_payload("m", messages, **{**base, "native_entries": entries})
+    check("native skills add the container", payload["container"] == {"skills": entries}, f"got {payload.get('container')}")
+    check(
+        "native skills add the code-execution tool",
+        payload["tools"] == [{"type": "code_execution_20260521", "name": "code_execution"}],
+        f"got {payload.get('tools')}",
+    )
+
+
+def section_anthropic_http(node_cls) -> None:
+    section("Anthropic round-trip against a local stub")
+    import asyncio
+
+    client = importlib.import_module(f"{PACK_NAME}.nodes._anthropic_client")
+    client._RETRY_BASE_DELAY = 0.01
+
+    server = _StubServer(("127.0.0.1", 0), _StubHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    expected_path = "/v1/messages"
+
+    def reply(*blocks, stop_reason="end_turn"):
+        return {"content": list(blocks), "stop_reason": stop_reason}
+
+    def text(value):
+        return {"type": "text", "text": value}
+
+    def run(**overrides):
+        kwargs = {"prompt": "hello", "model": "claude-opus-5", "base_url": base_url, "api_key": "sk-ant-test"}
+        kwargs.update(overrides)
+        return asyncio.run(node_cls.execute(**kwargs))
+
+    try:
+        # --- happy path ------------------------------------------------------ #
+        server.script([(200, reply(text("hi there")), 0.0)])
+        text_out, reasoning = run()
+        check("text block becomes the text output", text_out == "hi there", f"got {text_out!r}")
+        check("no thinking blocks means empty reasoning", reasoning == "", f"got {reasoning!r}")
+
+        request = server.requests[-1]
+        check("posts to /v1/messages", request["path"] == expected_path, f"got {request['path']!r}")
+        body = request["body"]
+        check("body carries the model", body.get("model") == "claude-opus-5", f"got {body.get('model')!r}")
+        check("body carries max_tokens", "max_tokens" in body, f"got {sorted(body)}")
+
+        # --- auth styles ------------------------------------------------------ #
+        check(
+            "default auth sends x-api-key",
+            request["headers"].get("x-api-key") == "sk-ant-test",
+            f"got {request['headers'].get('x-api-key')!r}",
+        )
+        check(
+            "...and no Authorization header",
+            request["headers"].get("Authorization") is None,
+            f"got {request['headers'].get('Authorization')!r}",
+        )
+        check(
+            "the version header is sent",
+            request["headers"].get("anthropic-version") == "2023-06-01",
+            f"got {request['headers'].get('anthropic-version')!r}",
+        )
+
+        server.script([(200, reply(text("ok")), 0.0)])
+        run(auth_style="Authorization: Bearer")
+        headers = server.requests[-1]["headers"]
+        check("bearer style sends Authorization", headers.get("Authorization") == "Bearer sk-ant-test", f"got {headers}")
+        check("...and no x-api-key header", headers.get("x-api-key") is None, f"got {headers.get('x-api-key')!r}")
+
+        server.script([(200, reply(text("ok")), 0.0)])
+        run(api_key="")
+        headers = server.requests[-1]["headers"]
+        check(
+            "an empty key sends neither auth header",
+            headers.get("x-api-key") is None and headers.get("Authorization") is None,
+            f"got {dict(headers)}",
+        )
+
+        server.script([(200, reply(text("ok")), 0.0)])
+        run(anthropic_version="")
+        check(
+            "a blank version omits the header",
+            server.requests[-1]["headers"].get("anthropic-version") is None,
+            f"got {server.requests[-1]['headers'].get('anthropic-version')!r}",
+        )
+
+        # --- response shapes --------------------------------------------------- #
+        server.script([(200, reply({"type": "thinking", "thinking": "step by step"}, text("answer")), 0.0)])
+        text_out, reasoning = run()
+        check("thinking blocks become the reasoning output", reasoning == "step by step", f"got {reasoning!r}")
+        check("text still returned alongside thinking", text_out == "answer", f"got {text_out!r}")
+
+        server.script([(200, reply(text("one "), text("two")), 0.0)])
+        text_out, _ = run()
+        check("multiple text blocks are concatenated", text_out == "one two", f"got {text_out!r}")
+
+        server.script(
+            [(200, reply({"type": "thinking", "thinking": "a"}, {"type": "thinking", "thinking": "b"}), 0.0)]
+        )
+        text_out, reasoning = run()
+        check("a trace-only response leaves text empty", text_out == "", f"got {text_out!r}")
+        check("...and still returns the trace", reasoning == "a\n\nb", f"got {reasoning!r}")
+
+        server.script([(200, reply(text("cut off"), stop_reason="max_tokens"), 0.0)])
+        text_out, _ = run()
+        check("a truncated answer is returned, not thrown away", text_out == "cut off", f"got {text_out!r}")
+
+        # --- error branches ---------------------------------------------------- #
+        server.script(
+            [(200, reply(text("no"), stop_reason="refusal") | {"stop_details": {"category": "cyber"}}, 0.0)]
+        )
+        try:
+            run()
+        except ValueError as exc:
+            message = str(exc)
+            check("refusal raises", "cyber" in message, f"got {message}")
+            check("...and names the node", "LlmApiAnthropic: " in message, f"got {message}")
+        else:
+            check("refusal raises", False, "no exception raised")
+
+        error_cases = [
+            ("401", (401, {"type": "error", "error": {"type": "authentication_error", "message": "bad key"}}, 0.0), "bad key"),
+            ("400", (400, {"type": "error", "error": {"message": "model not found"}}, 0.0), "model not found"),
+            ("malformed json", (200, b"<html>nope</html>", 0.0), "not valid JSON"),
+            # The single most useful message in this node: an OpenAI-shaped body
+            # arriving at the Anthropic node means the wrong endpoint was chosen.
+            ("an OpenAI-shaped body", (200, {"choices": [{"message": {"content": "hi"}}]}, 0.0), "content"),
+            ("an empty content array", (200, {"content": [], "stop_reason": "end_turn"}, 0.0), "content blocks"),
+            ("empty body", (200, b"", 0.0), "empty body"),
+        ]
+        for name, response, needle in error_cases:
+            server.script([response])
+            try:
+                run()
+            except ValueError as exc:
+                message = str(exc)
+                check(f"{name} raises", "LlmApiAnthropic: " in message, f"got {message}")
+                check(f"{name} message mentions the cause", needle in message, f"got {message}")
+            else:
+                check(f"{name} raises", False, "no exception raised")
+
+        server.script([(401, {"type": "error", "error": {"message": "bad key"}}, 0.0)])
+        try:
+            run()
+        except ValueError as exc:
+            check("a 401 hints at the auth style", "auth_style" in str(exc), f"got {exc}")
+        else:
+            check("a 401 hints at the auth style", False, "no exception raised")
+
+        # --- local skill injection --------------------------------------------- #
+        server.script([(200, reply(text("ok")), 0.0)])
+        run(skill="image-prompt-enhancer", system_prompt="USER INSTRUCTIONS")
+        system = server.requests[-1]["body"].get("system", "")
+        check("the skill body reaches the system parameter", "Image Prompt Enhancer" in system, f"got {system[:80]!r}")
+        check("...before the user's own instructions", system.index("Image Prompt Enhancer") < system.index("USER"))
+        check("the user's instructions are still there", system.endswith("USER INSTRUCTIONS"), f"got {system[-60:]!r}")
+
+        server.script([(200, reply(text("ok")), 0.0)])
+        run(skill="(none)", system_prompt="USER INSTRUCTIONS")
+        check(
+            "the none sentinel sends only the user's prompt",
+            server.requests[-1]["body"].get("system") == "USER INSTRUCTIONS",
+            f"got {server.requests[-1]['body'].get('system')!r}",
+        )
+
+        try:
+            run(skill="no-such-skill")
+        except ValueError as exc:
+            check("a missing skill raises before any request", "LlmApiAnthropic: " in str(exc), f"got {exc}")
+        else:
+            check("a missing skill raises before any request", False, "no exception raised")
+
+        # --- native skills ------------------------------------------------------ #
+        server.script([(200, reply(text("ok")), 0.0)])
+        run(native_skills="xlsx, skill_abc123")
+        body = server.requests[-1]["body"]
+        headers = server.requests[-1]["headers"]
+        check("the container is attached", body.get("container", {}).get("skills", []) != [], f"got {body.get('container')}")
+        check("the code-execution tool is attached", body.get("tools") == [{"type": "code_execution_20260521", "name": "code_execution"}], f"got {body.get('tools')}")
+        betas = headers.get("anthropic-beta", "")
+        check("both betas are requested", "code-execution-2025-08-25" in betas and "skills-2025-10-02" in betas, f"got {betas!r}")
+
+        server.script([(200, reply(text("ok")), 0.0)])
+        run(native_skills="")
+        body = server.requests[-1]["body"]
+        check(
+            "no native skills means no container, no tools, no beta header",
+            "container" not in body
+            and "tools" not in body
+            and server.requests[-1]["headers"].get("anthropic-beta") is None,
+            f"container={body.get('container')!r} tools={body.get('tools')!r}",
+        )
+
+        # The container is Anthropic's own infrastructure, so a relay failing here
+        # is the expected outcome -- the message has to say so rather than pass on
+        # a bare 404.
+        server.script([(404, {"type": "error", "error": {"message": "not found"}}, 0.0)])
+        try:
+            run(native_skills="xlsx")
+        except ValueError as exc:
+            message = str(exc)
+            check("a container-path 404 explains the container prerequisite", "透传" in message, f"got {message}")
+            check("...and points at the local skill route", "skill" in message, f"got {message}")
+        else:
+            check("a container-path 404 explains the container prerequisite", False, "no exception raised")
+
+        # A local-skill 404 must NOT carry the container note -- it would be a lie.
+        server.script([(404, {"type": "error", "error": {"message": "not found"}}, 0.0)])
+        try:
+            run()
+        except ValueError as exc:
+            check("a plain 404 carries no container note", "透传" not in str(exc), f"got {exc}")
+        else:
+            check("a plain 404 carries no container note", False, "no exception raised")
+
+        # --- custom endpoint handling -------------------------------------------- #
+        server.script([(200, reply(text("ok")), 0.0)])
+        run(base_url=f"http://127.0.0.1:{server.server_address[1]}/v1")
+        check(
+            "a base_url ending in /v1 does not double the version segment",
+            server.requests[-1]["path"] == expected_path,
+            f"got {server.requests[-1]['path']!r}",
+        )
+
+        server.script([(200, reply(text("ok")), 0.0)])
+        run(base_url=f"http://127.0.0.1:{server.server_address[1]}/v1/messages")
+        check(
+            "a complete messages URL is used as-is",
+            server.requests[-1]["path"] == expected_path,
+            f"got {server.requests[-1]['path']!r}",
+        )
+
+        server.script([(200, reply(text("ok")), 0.0)])
+        run(temperature=-1.0, reasoning_trace=False)
+        body = server.requests[-1]["body"]
+        check("sentinel defaults omit temperature and thinking", "temperature" not in body and "thinking" not in body, f"got {sorted(body)}")
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
 def main() -> int:
     print("ComfyUI-LLMApi self-test")
     print(f"pack:  {PACK_DIR}")
@@ -767,15 +1374,19 @@ def main() -> int:
         traceback.print_exc()
         return 1
 
-    node_cls = section_pack(pack)
-    node_module = importlib.import_module(f"{PACK_NAME}.nodes.chat")
+    nodes = section_pack(pack)
     section_dependencies()
-    section_schema(node_cls)
-    section_autogrow(node_cls)
-    section_locale(node_cls)
+    section_schema(nodes)
+    section_defaults()
+    section_autogrow(nodes)
+    section_locale(nodes)
     section_packaging()
+    section_skills()
     section_url()
-    section_http(node_cls, node_module)
+    section_http(nodes["LlmApiChat"], importlib.import_module(f"{PACK_NAME}.nodes.chat"))
+    section_anthropic_url()
+    section_anthropic_request()
+    section_anthropic_http(nodes["LlmApiAnthropic"])
 
     print(f"\n{_PASSES} passed, {len(_FAILURES)} failed")
     if _FAILURES:

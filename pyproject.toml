@@ -1,7 +1,7 @@
 [project]
 name = "llm-api-chat"
 version = "0.1.0"
-description = "Call any OpenAI-compatible chat endpoint from ComfyUI with your own base URL and API key, with optional vision input and reasoning output."
+description = "Call an LLM endpoint from ComfyUI with your own base URL and API key: an OpenAI chat-completions node and an Anthropic Messages node with Agent Skills, both with optional vision input and reasoning output."
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 # Single source of truth: ComfyUI Manager installs requirements.txt, and the

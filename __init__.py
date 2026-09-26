@@ -1,10 +1,16 @@
-"""ComfyUI-LLMApi -- talk to any OpenAI-compatible chat endpoint with your own key.
+"""ComfyUI-LLMApi -- talk to an LLM endpoint directly, with your own key.
 
-One node, ``LlmApiChat``: you supply the base URL, the API key and the model
-name, and this pack talks to that endpoint directly. No proxy, no Comfy Org
-account, no credits -- so it works against OpenAI, DeepSeek, Moonshot, Zhipu,
-DashScope, a local vLLM, Ollama's OpenAI-compatible layer, or any relay, as long
-as the endpoint speaks the OpenAI chat-completions shape.
+Two nodes, one per protocol. In both, you supply the base URL, the API key and
+the model name, and the node talks to that endpoint itself: no proxy, no Comfy
+Org account, no credits.
+
+* ``LlmApiChat`` -- the OpenAI chat-completions shape, which is the lingua franca
+  of self-hosted servers and relays. Works against OpenAI, DeepSeek, Moonshot,
+  Zhipu, DashScope, a local vLLM, Ollama's compatible layer, or any relay.
+* ``LlmApiAnthropic`` -- the Anthropic Messages API, which the sibling cannot
+  reach, and which is where Agent Skills live: either a local ``SKILL.md``
+  injected into the system prompt, or skills mounted into Anthropic's own
+  server-side container by id.
 
 This package uses the **V3 node schema** (``comfy_api.latest``), not the legacy
 V1 ``NODE_CLASS_MAPPINGS`` dict. ComfyUI picks the V3 path only when

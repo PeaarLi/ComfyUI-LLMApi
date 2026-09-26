@@ -11,13 +11,11 @@ Every user-facing failure message is built here so they all carry the same
 
 from __future__ import annotations
 
-import asyncio
 import json
 from typing import Any
 
-import httpx
-
 from ._media import _reasoning_from_message
+from ._transport import _post_json, _snippet
 
 __all__ = [
     "_ERROR_PREFIX",
@@ -32,20 +30,6 @@ __all__ = [
 _ERROR_PREFIX = "LlmApiChat: "
 
 _CHAT_COMPLETIONS_SUFFIX = "/chat/completions"
-
-# Enough of a bad response body to diagnose the problem without dumping a
-# megabyte of HTML error page into ComfyUI's log and error box.
-_SNIPPET_CHARS = 600
-
-# Statuses worth a retry: the transient ones. Everything else (401, 404, 422...)
-# is a configuration error that will fail identically however many times it is
-# sent, so retrying only delays the error the user needs to see.
-_RETRYABLE_STATUS = frozenset({408, 409, 425, 429, 500, 502, 503, 504})
-_RETRY_BASE_DELAY = 1.0
-
-# Redirects that instruct clients to re-issue the request as a GET, dropping the
-# body (RFC 9110). 307/308 are deliberately absent: they preserve method and body.
-_METHOD_REWRITING_STATUS = frozenset({301, 302, 303})
 
 # This node's dominant failure mode is a misconfigured endpoint, not a broken
 # server -- the user supplies the URL, the key and the model by hand, and every
@@ -71,28 +55,6 @@ _STATUS_HINTS = {
     422: "参数校验失败 / unprocessable. 端点不接受某个参数或取值，检查 model 名与图片格式。",
     429: "触发限流 / rate limited. 稍后重试，或调大 max_retries。",
 }
-
-
-def _redirect_note(response: httpx.Response) -> str:
-    """Name a followed redirect that rewrote POST into GET.
-
-    Redirects ARE followed, because 307/308 preserve the method and body and a
-    relay using one is genuinely rescued by that. But 301/302/303 tell every
-    compliant client to re-issue the request as a GET and drop the body, so a
-    chat-completions call arriving that way cannot succeed. What comes back --
-    405, 501, or a login page -- describes the destination, not the problem,
-    and a status hint would blame the wrong party. The chain is still on
-    ``response.history``, so the real cause can be stated instead.
-    """
-    rewritten = [item for item in response.history if item.status_code in _METHOD_REWRITING_STATUS]
-    if not rewritten:
-        return ""
-    first = rewritten[0]
-    location = first.headers.get("location", "未知地址 / unknown")
-    return (
-        f"请求经过了 {first.status_code} 重定向到 {location}，而 301/302/303 会把 POST 改写成 GET 并丢掉请求体，"
-        "所以端点不可能正常返回。请把 base_url 直接改成重定向后的最终地址。"
-    )
 
 
 def _status_hint(status: int) -> str:
@@ -196,13 +158,6 @@ def _build_payload(
     return payload
 
 
-def _snippet(text: str, limit: int = _SNIPPET_CHARS) -> str:
-    collapsed = " ".join((text or "").split())
-    if len(collapsed) <= limit:
-        return collapsed
-    return collapsed[:limit] + "…"
-
-
 def _error_message(error: Any) -> str:
     """Pull a readable message out of an ``error`` field of unknown shape."""
     if isinstance(error, dict):
@@ -286,50 +241,19 @@ async def _post_chat(
     timeout: float,
     max_retries: int,
 ) -> str:
-    """POST the payload, retrying only transient failures, and return the body text.
+    """POST to a chat-completions endpoint.
 
-    A fresh ``AsyncClient`` per call, closed by the context manager. A
-    module-level client would be cheaper, but it binds to the event loop it is
-    first used on, and ComfyUI is free to run node execution on a different loop
-    (or a thread with its own loop) after a restart or under ``--async-offload``.
-    Connection setup is negligible next to an LLM call.
+    A thin wrapper over the shared transport, which owns the retry policy, the
+    timeout mapping and the redirect handling. Only the OpenAI-specific pieces
+    are supplied here: this node's error prefix, and the status hints that name
+    a chat-completions-specific cause.
     """
-    attempts = max_retries + 1
-    last_error: str | None = None
-
-    for attempt in range(attempts):
-        try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-                response = await client.post(url, json=payload, headers=headers)
-        except httpx.TimeoutException as exc:
-            last_error = (
-                f"请求超时 / request timed out after {timeout:g}s ({type(exc).__name__}). "
-                "推理模型和长上下文可能需要更长时间，可以调大 timeout。"
-            )
-        except httpx.HTTPError as exc:
-            last_error = (
-                f"连接失败 / could not reach {url} ({type(exc).__name__}: {exc}). "
-                "检查 base_url 是否能从这台机器访问，以及是否需要代理。"
-                "如果设了 HTTP_PROXY/HTTPS_PROXY，本地端点可能被代理拦下 —— 把 127.0.0.1 加进 NO_PROXY。"
-            )
-        else:
-            if response.is_success:
-                return response.text
-            # A rewritten redirect explains the failure better than the status
-            # code it ended on, so it wins when both apply.
-            hint = _redirect_note(response) or _status_hint(response.status_code)
-            last_error = (
-                f"HTTP {response.status_code} {response.reason_phrase} 来自 / from {url}. "
-                + (f"{hint} " if hint else "")
-                + f"响应 / response: {_snippet(response.text)}"
-            )
-            if response.status_code not in _RETRYABLE_STATUS:
-                break
-
-        if attempt + 1 < attempts:
-            # Exponential backoff: 1s, 2s, 4s... A 429 or an overloaded endpoint
-            # usually clears well inside that.
-            await asyncio.sleep(_RETRY_BASE_DELAY * (2**attempt))
-
-    retried = f" （已尝试 {attempts} 次 / tried {attempts} times）" if attempts > 1 else ""
-    raise ValueError(f"{_ERROR_PREFIX}{last_error}{retried}")
+    return await _post_json(
+        url,
+        headers,
+        payload,
+        timeout=timeout,
+        max_retries=max_retries,
+        error_prefix=_ERROR_PREFIX,
+        status_hint=_status_hint,
+    )

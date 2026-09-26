@@ -97,6 +97,7 @@ class LlmApiChat(io.ComfyNode):
                 ),
                 io.String.Input(
                     "base_url",
+                    optional=True,
                     default=DEFAULT_BASE_URL,
                     placeholder="https://api.deepseek.com/v1",
                     tooltip=(
@@ -108,6 +109,7 @@ class LlmApiChat(io.ComfyNode):
                 ),
                 io.String.Input(
                     "api_key",
+                    optional=True,
                     default="",
                     tooltip=(
                         "Bearer token for the endpoint. Leave empty for local servers that need no key (Ollama, "
@@ -118,12 +120,14 @@ class LlmApiChat(io.ComfyNode):
                 ),
                 io.String.Input(
                     "system_prompt",
+                    optional=True,
                     multiline=True,
                     default="",
                     tooltip="Foundational instructions that shape the model's behaviour. Blank omits the system message entirely.",
                 ),
                 io.Autogrow.Input(
                     "images",
+                    optional=True,
                     template=io.Autogrow.TemplateNames(
                         # This inner tooltip is load-bearing, and it is the one
                         # string in the schema that locales/zh CANNOT override:
@@ -152,6 +156,7 @@ class LlmApiChat(io.ComfyNode):
                 ),
                 io.Int.Input(
                     "seed",
+                    optional=True,
                     default=DEFAULT_SEED,
                     min=0,
                     max=SEED_MAX,
@@ -165,6 +170,7 @@ class LlmApiChat(io.ComfyNode):
                 ),
                 io.Float.Input(
                     "temperature",
+                    optional=True,
                     default=DEFAULT_TEMPERATURE,
                     min=-1.0,
                     max=2.0,
@@ -178,6 +184,7 @@ class LlmApiChat(io.ComfyNode):
                 ),
                 io.Int.Input(
                     "max_tokens",
+                    optional=True,
                     default=DEFAULT_MAX_TOKENS,
                     min=0,
                     max=MAX_TOKENS_MAX,
@@ -191,6 +198,7 @@ class LlmApiChat(io.ComfyNode):
                 ),
                 io.Float.Input(
                     "timeout",
+                    optional=True,
                     default=DEFAULT_TIMEOUT,
                     min=TIMEOUT_MIN,
                     max=TIMEOUT_MAX,
@@ -204,6 +212,7 @@ class LlmApiChat(io.ComfyNode):
                 ),
                 io.Int.Input(
                     "max_retries",
+                    optional=True,
                     default=DEFAULT_MAX_RETRIES,
                     min=0,
                     max=RETRIES_MAX,

@@ -58,5 +58,82 @@
         "tooltip": "模型的思考内容，前提是端点会返回它。不会「出声思考」的模型这里是空字符串，所以这个端口可以放心接线。"
       }
     }
+  },
+
+  "LlmApiAnthropic": {
+    "display_name": "LLM API Anthropic",
+    "description": "用你自己的 BaseURL 和 API KEY，直连 Anthropic Messages API 端点，并支持 Skill。Skill 有两条相互独立的路径：本地 SKILL.md 注入 system 参数（任意端点都能用，包括中转站），或原生 Anthropic skill 按 id 挂进服务端容器（需要端点透传 Anthropic 的容器）。",
+    "inputs": {
+      "prompt": {
+        "name": "提示词",
+        "tooltip": "用户消息正文。接了图的时候可以留空，但提示词和图片不能同时为空。"
+      },
+      "model": {
+        "name": "模型",
+        "tooltip": "模型名，必须和端点认识的写法一致：claude-opus-5、claude-sonnet-5、claude-haiku-4-5，或者中转站自己的叫法。这里刻意用文本框：中转站的模型名无法预先枚举。"
+      },
+      "base_url": {
+        "name": "BaseURL",
+        "tooltip": "端点前缀。解析规则：裸主机名会接上 '/v1/messages'；以 '/v1' 结尾的接 '/messages'；已经以 '/messages' 结尾的原样使用。所以 https://api.anthropic.com 和 https://api.anthropic.com/v1 都可以。中转站路径不一样时，直接把完整 URL 粘进来。"
+      },
+      "api_key": {
+        "name": "API KEY",
+        "tooltip": "端点的密钥。留空则完全不发认证头（本地 Anthropic 兼容服务用）。⚠️ 警告：ComfyUI 没有密码类型的控件，这个值会以明文存进 workflow JSON 并显示在界面上。"
+      },
+      "auth_style": {
+        "name": "认证头形式",
+        "tooltip": "密钥放在哪个头里。Anthropic 官方要 'x-api-key'；多数中转站只实现了 'Authorization: Bearer'（因为其它 OpenAI 兼容客户端都发这个）。永远只发其中一个 —— 选错通常表现为 401。"
+      },
+      "anthropic_version": {
+        "name": "API 版本",
+        "tooltip": "'anthropic-version' 头的值。留空则完全不发这个头，个别中转站偏好如此。"
+      },
+      "system_prompt": {
+        "name": "系统提示词",
+        "tooltip": "你的指令，作为顶层的 'system' 参数发送。它排在所选 skill 的正文之后，所以这里写的内容会覆盖 skill。"
+      },
+      "skill": {
+        "name": "本地 Skill",
+        "tooltip": "从本包 skills/ 目录里选一个 SKILL.md，把正文注入 system 参数。这条路径对任意端点（包括中转站）都有效。注意它只是把文本给模型看，模型没法像 Anthropic 自己的容器路径那样按需去读 skill 的附属文件。下拉列表在启动时扫描，所以新增 skill 目录要重启 ComfyUI；改已有 skill 的正文不用。"
+      },
+      "images": {
+        "name": "参考图",
+        "tooltip": "可选的参考图，供视觉模型使用，最多 8 张。每张先缩放到不超过 1280x1280，再以 base64 图片块发送 —— 这是 Anthropic 自己的形状，不是 OpenAI 的 data URI。批量输入会按帧展开，一帧算一张。"
+      },
+      "reasoning_trace": {
+        "name": "返回思考过程",
+        "tooltip": "要求模型把思考过程从 reasoning 端口返回。打开时设置 thinking.display 为 'summarized'。关掉则完全不发这个字段 —— 注意当前模型即使不发也照样在思考，只是不返回文本，所以关掉只省下摘要本身的开销。"
+      },
+      "native_skills": {
+        "name": "原生 Skill",
+        "tooltip": "Anthropic 原生 skill，按 id 填，逗号或换行分隔（单请求最多 8 个）。它们会和代码执行工具一起挂进服务端容器，所以模型能读取 skill 的附属文件 —— 这才是真正的原生机制，和上面的本地 Skill 下拉不是一回事。id 要么是 Anthropic 预置的文档 skill（xlsx、docx、pptx、pdf），要么是你发布到 POST /v1/skills 的自定义 skill（其余 id 按 custom 发送）。⚠️ 容器是 Anthropic 自己的基础设施，中转站通常会失败 —— 自定义 BaseURL 时请改用上面的本地 Skill。"
+      },
+      "max_tokens": {
+        "name": "最大 token 数",
+        "tooltip": "Anthropic 的必填项，这里没有「交给端点决定」这个选项。记得把思考过程也算进预算：推理模型会在写出答案之前先花掉一部分，达到上限会截断回复（本节点会告警而不是直接失败）。"
+      },
+      "temperature": {
+        "name": "温度",
+        "tooltip": "采样温度，范围 0–1（不是 OpenAI 节点那个 0–2）。默认 -1 表示完全不发送这个字段。这个默认是刻意的：当前模型已经移除了采样参数，发出去会 400。"
+      },
+      "timeout": {
+        "name": "超时",
+        "tooltip": "等待响应的秒数，覆盖模型的全部生成时间 —— 包括思考过程，以及走原生 skill 时容器里跑的那些东西。"
+      },
+      "max_retries": {
+        "name": "最大重试次数",
+        "tooltip": "在连接失败、超时，或遇到瞬时状态码（429、5xx）后的重试次数，指数退避。0 表示只发一次。配置类错误（401、404、422）永远不会重试。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "文本",
+        "tooltip": "模型的回复正文，取自响应里的 text 块。如果只返回了思考过程，这里是空字符串。"
+      },
+      "1": {
+        "name": "思考过程",
+        "tooltip": "响应里的 thinking 块。关掉「返回思考过程」时为 empty，模型不返回思考链时也是。"
+      }
+    }
   }
 }

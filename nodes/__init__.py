@@ -7,13 +7,16 @@ lists them so the package entry point stays a two-liner. The order of
 
 from __future__ import annotations
 
+from .anthropic import LlmApiAnthropic
 from .chat import LlmApiChat
 
 ALL_NODES: list[type] = [
     LlmApiChat,
+    LlmApiAnthropic,
 ]
 
 __all__ = [
     "ALL_NODES",
     "LlmApiChat",
+    "LlmApiAnthropic",
 ]

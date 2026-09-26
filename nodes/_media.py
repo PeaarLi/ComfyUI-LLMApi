@@ -28,6 +28,7 @@ from PIL import Image
 
 __all__ = [
     "_IMAGE_MAX_PIXELS",
+    "_image_payloads",
     "_images_to_data_uris",
     "_reasoning_from_message",
     "_select_image_tensors",
@@ -112,17 +113,34 @@ def _downscale(pil_image: Image.Image) -> Image.Image:
     return pil_image.resize((max(1, round(width * scale)), max(1, round(height * scale))), Image.Resampling.LANCZOS)
 
 
-def _pil_to_data_uri(pil_image: Image.Image) -> str:
+def _pil_to_payload(pil_image: Image.Image) -> tuple[str, str]:
+    """Encode as PNG and return ``(mime_type, base64_data)``.
+
+    Returned as parts rather than a finished string because the two providers
+    spell an inline image differently. OpenAI wraps it in a ``data:`` URI under
+    ``{"type": "image_url", "image_url": {"url": ...}}``; Anthropic takes the
+    bare base64 under ``{"type": "image", "source": {"type": "base64", ...}}``.
+    Splitting here lets each build its own block without either having to
+    re-parse the other's encoding.
+    """
     buffer = BytesIO()
     # PNG keeps alpha, which a JPEG conversion would flatten onto black -- and
     # this environment's VAE produces RGBA images routinely.
     pil_image.save(buffer, format="PNG")
-    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-    return f"data:{_MIME_TYPE};base64,{encoded}"
+    return _MIME_TYPE, base64.b64encode(buffer.getvalue()).decode("ascii")
+
+
+def _image_payloads(tensors: list[torch.Tensor]) -> list[tuple[str, str]]:
+    return [_pil_to_payload(_downscale(_tensor_to_pil(tensor))) for tensor in tensors]
 
 
 def _images_to_data_uris(tensors: list[torch.Tensor]) -> list[str]:
-    return [_pil_to_data_uri(_downscale(_tensor_to_pil(tensor))) for tensor in tensors]
+    """OpenAI's inline form: one ``data:`` URI per image.
+
+    Kept as a thin wrapper over ``_image_payloads`` so that ``chat.py`` and the
+    bytes it puts on the wire are untouched by the Anthropic node's arrival.
+    """
+    return [f"data:{mime_type};base64,{encoded}" for mime_type, encoded in _image_payloads(tensors)]
 
 
 def _reasoning_from_message(choice: dict) -> str:
