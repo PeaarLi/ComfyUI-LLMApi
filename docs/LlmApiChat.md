@@ -150,11 +150,21 @@ suggests fewer or smaller images, `429` suggests raising `max_retries`.
 
 ## Behind a proxy
 
-`httpx` honours `HTTP_PROXY` / `HTTPS_PROXY`, which is what you want when a relay
-is only reachable through a proxy — but it also means a proxy that does not
-exclude loopback will swallow requests to `http://127.0.0.1:11434/v1`, and the
-symptom is a connection failure against a server you can plainly see running. Add
-`127.0.0.1` (and `localhost`) to `NO_PROXY` if you hit that.
+Remote endpoints honour `HTTP_PROXY` / `HTTPS_PROXY`, which is what you want when
+a relay is only reachable through a proxy.
+
+**Loopback endpoints do not**, and that is deliberate. On Windows, `httpx` resolves
+proxies through `urllib`, which falls back to the registry when no `HTTP_PROXY` is
+set, and then uses that proxy *without* the registry's own `ProxyOverride` bypass
+list. So with Clash or any other tool that enables the Windows system proxy, a
+request to `127.0.0.1` gets handed to the proxy even though the bypass list says
+`localhost;127.*`. The symptom is confusing in two ways: while the proxy is up,
+every local call pays its latency; once the proxy is down but the registry entry
+remains, a local server you can plainly see running reports as unreachable.
+
+This node sets `trust_env=False` for any request whose host is loopback (including
+`0.0.0.0`), so those never touch a proxy. LAN addresses are left alone, since those
+may legitimately need one.
 
 ## Image slot tooltips
 

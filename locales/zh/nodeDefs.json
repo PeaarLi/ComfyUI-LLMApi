@@ -94,7 +94,11 @@
       },
       "skill": {
         "name": "本地 Skill",
-        "tooltip": "从本包 skills/ 目录里选一个 SKILL.md，把正文注入 system 参数。这条路径对任意端点（包括中转站）都有效。注意它只是把文本给模型看，模型没法像 Anthropic 自己的容器路径那样按需去读 skill 的附属文件。下拉列表在启动时扫描，所以新增 skill 目录要重启 ComfyUI；改已有 skill 的正文不用。"
+        "tooltip": "从本包 skills/ 目录里选一个 SKILL.md，把正文注入 system 参数，后面再跟上它 references/ 里的文件。这条路径对任意端点（包括中转站）都有效，因为它只是文本。连带内联参考文件是有原因的：很多 skill 是「路由器」，正文只写着「去读 references/xxx 并照做」，而单次请求的节点没法让模型自己去读文件 —— 内联就是把它压平。代价是模型仍然无法执行 skill 的 scripts/。下拉列表在启动时扫描，所以新增 skill 目录要重启 ComfyUI；改已有 skill 的正文不用。"
+      },
+      "inline_references": {
+        "name": "内联参考文件",
+        "tooltip": "把所选 skill 的 references/ 文件追加到 system 提示词。默认开启：很多 skill 是路由器式的（正文让你去读 references/ 下的文件），而本节点只有一次请求，模型没法自己读，关掉就等于让它去读一个够不到的文件。已知正文能独立成立、或参考文件很大时，可以关掉以省上下文。注意 scripts/ 和 assets/ 永远不会被内联 —— 一个是待执行的代码，一个是模型输出的模板，都不是指令文本。"
       },
       "images": {
         "name": "参考图",

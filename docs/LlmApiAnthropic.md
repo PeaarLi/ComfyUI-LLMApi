@@ -24,7 +24,8 @@ max_retries
 | `auth_style` | COMBO (advanced) | `x-api-key` | `x-api-key` / `Authorization: Bearer` | Which header carries the key. See [Auth](#auth). |
 | `anthropic_version` | STRING (advanced) | `2023-06-01` | — | Blank omits the `anthropic-version` header. |
 | `system_prompt` | STRING (multiline) | `""` | — | Sent as the top-level `system` parameter, after the selected skill's text. |
-| `skill` | COMBO | `(none)` | `(none)` + bundled skills | A local `SKILL.md`, injected into `system`. See [Skills](#skills). |
+| `skill` | COMBO | `(none)` | `(none)` + bundled skills | A local `SKILL.md`, injected into `system` with its `references/`. See [Skills](#skills). |
+| `inline_references` | BOOLEAN (advanced) | `True` | — | Append the skill's `references/` files. See [Skills](#skills). |
 | `images` | AUTOGROW(IMAGE) | no slots | up to 8 | Sent as Anthropic base64 image blocks. A batch expands one image per frame. |
 | `reasoning_trace` | BOOLEAN (advanced) | `True` | — | Sets `thinking.display` to `summarized`. |
 | `native_skills` | STRING (advanced) | `""` | ≤ 8 ids | Anthropic-native skill ids. See [Native skills](#native-skills). |
@@ -84,25 +85,55 @@ whole reason both exist.
 ### Local (`skill`)
 
 A `SKILL.md` from this pack's `skills/` directory. The frontmatter is parsed for
-its required `name` and `description`, and the **body** is injected into the
-`system` parameter, before your own `system_prompt` — so anything you write there
-overrides the skill.
+its required `name` and `description`; the **body** is injected into the `system`
+parameter, before your own `system_prompt` — so anything you write there overrides
+the skill. The skill's `references/` files are then appended, each under a
+`## Reference: <relative path>` heading.
 
 - Works against **any** Anthropic-shaped endpoint, including relays, because it is
   only text.
-- **It is an approximation of the real mechanism.** Anthropic's own container route
-  lets the model read supporting files on demand; here the body is all the model
-  gets, so a skill that depends on `references/` or `scripts/` will not work.
+- **Inlining the references is what makes a router-style skill work at all.** Many
+  skills are routers: their body says "read `references/base-en.txt` and follow its
+  prompt structure". Injected as a body alone, that instructs the model to read a
+  file it has no way to reach. Flattening them in is the closest a single-request
+  node can come to the on-demand reads the container route allows. Switch it off
+  with `inline_references` when the body stands alone or the references are large.
+- `scripts/` and `assets/` are **never** inlined: one is code to execute and the
+  other is a template for the model's *output*, so neither is instruction text. A
+  skill that depends on running its scripts will not work here.
+- References are appended in sorted order, so the prompt is byte-identical between
+  runs and does not defeat the endpoint's prompt caching.
 - The combo's list is built **at import**, so adding or removing a skill directory
   needs a ComfyUI restart. Editing an existing skill's *text* does not — bodies are
   re-read on every run.
 - A malformed manifest is skipped at discovery with a log warning rather than
-  taken down the whole pack; loading a skill you actually selected raises.
+  taking down the whole pack; loading a skill you actually selected raises.
 
 The format is the open Agent Skills standard, which means these same files work in
 Claude Code, Codex, Gemini CLI and Copilot CLI. Copying `skills/<name>/` to
 `~/.agents/skills/` is all it takes — that directory is the cross-runtime alias
 those tools share.
+
+#### The bundled set
+
+Nine skills, copied verbatim from
+<https://github.com/MiniMax-AI/MiniMax-H3/tree/main/skills> at commit
+`d21241f0a4b3acbb34c97dae47fa417b7065e438`: `h3-prompt-writing` plus eight
+video-generation planners. `h3-prompt-writing` is the one MiniMax itself treats as
+*the* skill — its repo also installs it into `.agents/skills/` and `.claude/skills/`.
+
+> **Licence.** This directory is **not** covered by the pack's MIT licence. It is
+> third-party content under the MiniMax H3 Community License Agreement, which
+> grants rights **solely within the Applicable Territory** — worldwide excluding
+> the European Union, the United Kingdom, the Republic of Korea and the United
+> States of America — and is additionally subject to an Acceptable Use Policy. Read
+> [skills/NOTICE.md](../skills/NOTICE.md) before redistributing. Deleting `skills/`
+> costs you only the dropdown entries; the nodes work without it.
+
+Every skill except `h3-prompt-writing` also ships a `SKILL.cn.md`, a Chinese
+translation of the same instructions. This node reads `SKILL.md` — the filename the
+standard mandates and the one every other runtime reads — so the Chinese variants
+sit unused unless you swap them in or copy the skill to `~/.agents/skills/`.
 
 ### Native (`native_skills`)
 

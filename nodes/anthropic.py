@@ -9,9 +9,12 @@ Skills reach the model by two different routes, and the node keeps them visibly
 separate because they are not interchangeable:
 
 * ``skill`` -- a local ``SKILL.md`` from this pack's ``skills/`` directory, whose
-  body is injected into the ``system`` parameter. Works against **any**
-  Anthropic-shaped endpoint, including relays, because it is only text. This is
-  what you want when you point ``base_url`` at a relay.
+  body is injected into the ``system`` parameter, followed by its ``references/``
+  files. Works against **any** Anthropic-shaped endpoint, including relays,
+  because it is only text. This is what you want when you point ``base_url`` at a
+  relay. Inlining the references matters more than it sounds: many skills are
+  routers whose body says "read references/x.txt and follow it", so the body alone
+  would instruct the model to read a file it has no way to reach.
 * ``native_skills`` -- skill ids attached as ``container.skills`` alongside the
   code-execution tool, which is Anthropic's own mechanism: the skills are mounted
   into a server-side sandbox and the model reads them from there. More capable,
@@ -79,11 +82,31 @@ RETRIES_MAX = 10
 MAX_IMAGES = 8
 IMAGE_SLOT_NAMES = [f"image_{index}" for index in range(1, MAX_IMAGES + 1)]
 
+DEFAULT_INLINE_REFERENCES = True
+
 # Discovered once, at import: the combo's options cannot change while ComfyUI is
 # running, so a skill directory added later needs a restart. Bodies are re-read on
 # every call, so editing one does not. _selftest.py pins both halves of that.
 SKILLS = _discover_skills()
 SKILL_OPTIONS = [_NO_SKILL] + [skill.name for skill in SKILLS]
+
+# Enough of each description to choose by, without the tooltip becoming a wall of
+# text. The bundled set is nine skills whose descriptions run to several hundred
+# characters each; untruncated, that is a ~3 KB hover.
+_LISTING_DESCRIPTION_CHARS = 90
+
+
+def _skill_listing() -> str:
+    """One line naming every bundled skill, for the combo's tooltip."""
+    if not SKILLS:
+        return "（包内没有 skill / no skills bundled）"
+    parts = []
+    for skill in SKILLS:
+        description = " ".join(skill.description.split())
+        if len(description) > _LISTING_DESCRIPTION_CHARS:
+            description = description[: _LISTING_DESCRIPTION_CHARS - 1].rstrip() + "…"
+        parts.append(f"{skill.name} — {description}")
+    return "; ".join(parts)
 
 
 class LlmApiAnthropic(io.ComfyNode):
@@ -91,7 +114,7 @@ class LlmApiAnthropic(io.ComfyNode):
 
     @classmethod
     def define_schema(cls) -> io.Schema:
-        skill_listing = "; ".join(f"{skill.name} — {skill.description}" for skill in SKILLS) or "（包内没有 skill / no skills bundled）"
+        skill_listing = _skill_listing()
         return io.Schema(
             node_id="LlmApiAnthropic",
             display_name="LLM API Anthropic",
@@ -185,11 +208,24 @@ class LlmApiAnthropic(io.ComfyNode):
                     default=_NO_SKILL,
                     tooltip=(
                         "A SKILL.md from this pack's skills/ directory, injected into the system parameter. "
-                        f"Available -- {skill_listing}. "
-                        "This route works on any endpoint including relays. Icons are not the whole story: the "
-                        "model sees the skill's text, it does not get to read supporting files on demand the way "
-                        "Anthropic's own container route allows. The list is scanned at startup, so a skill "
-                        "directory added later needs a ComfyUI restart; editing an existing skill's text does not."
+                        f"Bundled -- {skill_listing}. "
+                        "Works on any endpoint including relays, because it is only text. Its references/ files "
+                        "are inlined too, which is what makes a router-style skill work -- but the model still "
+                        "cannot execute a skill's scripts/. The list is scanned at startup, so a skill directory "
+                        "added later needs a ComfyUI restart; editing an existing skill's text does not."
+                    ),
+                ),
+                io.Boolean.Input(
+                    "inline_references",
+                    optional=True,
+                    default=DEFAULT_INLINE_REFERENCES,
+                    advanced=True,
+                    tooltip=(
+                        "Append the selected skill's references/ files to the system prompt. On by default "
+                        "because many skills are routers -- their SKILL.md tells the reader to go read a file "
+                        "under references/, which a single-request node cannot do, so without this the model is "
+                        "told to read something it cannot reach. Turn it off to save context when you know the "
+                        "body stands alone, or when the references are large."
                     ),
                 ),
                 io.Autogrow.Input(
@@ -322,6 +358,7 @@ class LlmApiAnthropic(io.ComfyNode):
         anthropic_version: str = DEFAULT_ANTHROPIC_VERSION,
         system_prompt: str = "",
         skill: str = _NO_SKILL,
+        inline_references: bool = DEFAULT_INLINE_REFERENCES,
         images: dict | None = None,
         reasoning_trace: bool = DEFAULT_REASONING_TRACE,
         native_skills: str = "",
@@ -355,7 +392,7 @@ class LlmApiAnthropic(io.ComfyNode):
                 "LlmApiAnthropic: prompt 和 images 不能同时为空 / prompt and images cannot both be empty."
             )
 
-        skill_body = _load_skill_body(skill)
+        skill_body = _load_skill_body(skill, inline_references=bool(inline_references))
         native_entries = _native_skill_entries(native_skills)
 
         headers = _base_headers(anthropic_version) | _auth_headers(api_key, auth_style)

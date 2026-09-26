@@ -39,9 +39,11 @@ import yaml
 __all__ = [
     "_MANIFEST_NAME",
     "_NO_SKILL",
+    "_REFERENCES_DIRNAME",
     "_Skill",
     "_discover_skills",
     "_load_skill_body",
+    "_reference_files",
     "_skills_root",
 ]
 
@@ -52,6 +54,16 @@ _ERROR_PREFIX = "LlmApiAnthropic: "
 _PACK_ROOT = Path(__file__).resolve().parent.parent
 _SKILLS_DIRNAME = "skills"
 _MANIFEST_NAME = "SKILL.md"
+
+# The standard's folder for background documentation, as opposed to scripts/ (code
+# to run) and assets/ (templates for generated output). Only this one is inlined --
+# see _load_skill_body.
+_REFERENCES_DIRNAME = "references"
+
+# A skill whose references run to six figures is going to eat a lot of context. Not
+# a cap, because silently truncating a skill's own instructions would be worse than
+# a big prompt, but worth saying out loud in the log.
+_LARGE_REFERENCE_WARNING_BYTES = 100_000
 
 # The sentinel the combo uses for "run without a skill". Not a valid skill name
 # (the spec allows only letters, digits and hyphens), so it cannot collide.
@@ -213,11 +225,36 @@ def _discover_skills(directory: Path | None = None) -> list[_Skill]:
     return found
 
 
-def _load_skill_body(name: str, directory: Path | None = None) -> str:
-    """Read the body of the named skill. Strict, because the user picked it.
+def _reference_files(skill_dir: Path) -> list[Path]:
+    """Every file under ``references/``, sorted, for inlining.
 
-    Read fresh every call rather than cached, so editing a skill's text takes
-    effect on the next run without restarting ComfyUI.
+    Sorted so the prompt is byte-identical between runs -- an unordered walk would
+    make the same skill produce a different prompt each time and quietly break
+    prompt caching on the endpoint side.
+    """
+    root = skill_dir / _REFERENCES_DIRNAME
+    if not root.is_dir():
+        return []
+    return sorted(path for path in root.rglob("*") if path.is_file())
+
+
+def _load_skill_body(name: str, directory: Path | None = None, *, inline_references: bool = True) -> str:
+    """Read the named skill's body, optionally followed by its reference files.
+
+    Strict, because the user picked this skill -- unlike discovery, a problem here
+    is a real error rather than something to skip. Read fresh every call rather
+    than cached, so editing a skill's text takes effect on the next run.
+
+    Inlining the references is what makes a skill like MiniMax's
+    ``h3-prompt-writing`` work at all: its SKILL.md is a router whose steps say
+    "read references/base-en.txt and follow its prompt structure". Injected as a
+    body alone, it tells the model to read files it has no way to reach. Flattening
+    the references in is the closest a single-request node can come to the
+    on-demand reads Anthropic's container route allows.
+
+    ``scripts/`` and ``assets/`` are deliberately not inlined: one is code to
+    execute and the other is a template for the model's *output*, so neither is
+    instruction text.
     """
     if not name or name == _NO_SKILL:
         return ""
@@ -235,6 +272,39 @@ def _load_skill_body(name: str, directory: Path | None = None) -> str:
         _, body = _parse_manifest(manifest)
     except ValueError as exc:
         raise ValueError(f"{_ERROR_PREFIX}{exc}") from exc
-    # Stripped here so the caller can concatenate without thinking about the
-    # blank line that always follows the closing frontmatter delimiter.
-    return body.strip()
+
+    # Stripped here so the caller can concatenate without thinking about the blank
+    # line that always follows the closing frontmatter delimiter.
+    body = body.strip()
+    if not inline_references:
+        return body
+
+    sections = [body]
+    total = 0
+    for path in _reference_files(manifest.parent):
+        try:
+            text = path.read_text(encoding="utf-8").strip()
+        except UnicodeDecodeError:
+            # Not text, so not instructions -- a PNG in references/ is fine to skip.
+            logging.warning("%s skipping non-text reference %s", _ERROR_PREFIX.strip(": "), path.name)
+            continue
+        except OSError as exc:
+            raise ValueError(f"{_ERROR_PREFIX}读不了参考文件 / cannot read reference {path}: {exc}") from exc
+        if not text:
+            continue
+        # Labelled with its path, because the body refers to these files by name --
+        # without the label the model cannot tell which instruction maps to which
+        # block. Relative POSIX form, matching how the body writes them.
+        relative = path.relative_to(manifest.parent).as_posix()
+        sections.append(f"## Reference: {relative}\n\n{text}")
+        total += len(text.encode("utf-8"))
+
+    if total > _LARGE_REFERENCE_WARNING_BYTES:
+        logging.warning(
+            "%s skill %r inlines %d KB of references; that is a large system prompt "
+            "on every call. Turn off inline_references to skip them.",
+            _ERROR_PREFIX.strip(": "),
+            name,
+            total // 1024,
+        )
+    return "\n\n".join(sections)

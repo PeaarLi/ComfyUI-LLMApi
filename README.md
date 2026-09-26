@@ -34,17 +34,26 @@ interchangeable:
 | | `skill` (local) | `native_skills` (native) |
 |---|---|---|
 | what it is | a `SKILL.md` from this pack's `skills/` | skill ids mounted into Anthropic's server-side container |
-| how it reaches the model | body injected into the `system` parameter | the model reads `SKILL.md` from the sandbox, on demand |
+| how it reaches the model | body injected into the `system` parameter, with its `references/` files appended | the model reads `SKILL.md` from the sandbox, on demand |
 | works on a relay? | **yes** — it is only text | usually **no** — the container is Anthropic's own infrastructure |
-| can read `references/` and run `scripts/`? | no | yes |
+| can read `references/` and run `scripts/`? | references yes, scripts no | yes |
 | setup | none | publish first via `POST /v1/skills` |
 
-Two skills ship with the pack — `image-prompt-enhancer` and `prompt-critic` — as
-working examples of the format.
+Inlining the `references/` files is not a nicety: many skills are *routers* whose
+body says "read `references/x.txt` and follow it", which a single-request node
+cannot do. Nine skills ship, all of them **MiniMax's official H3 Agent Skills**
+copied verbatim from <https://github.com/MiniMax-AI/MiniMax-H3/tree/main/skills>
+— `h3-prompt-writing` plus eight video-generation planners.
+
+> **Licence:** that directory is **not** MIT. It is third-party content under the
+> MiniMax H3 Community License, which is territory-scoped (it excludes the EU, UK,
+> South Korea and the USA). See [skills/NOTICE.md](skills/NOTICE.md) before
+> redistributing. Deleting `skills/` costs you only the dropdown entries.
 
 The files follow the open **Agent Skills** standard, so they are portable: copy
 `skills/<name>/` to `~/.agents/skills/` and Claude Code, Codex, Gemini CLI and
-Copilot CLI can use the same skill unchanged.
+Copilot CLI can use the same skill unchanged — MiniMax's repo installs
+`h3-prompt-writing` into exactly those directories itself.
 
 Full details, including the publishing commands and the container's constraints:
 [docs/LlmApiAnthropic.md](docs/LlmApiAnthropic.md).
@@ -134,10 +143,20 @@ comment-only.
 
 ## Troubleshooting
 
-**Connection refused against a server that is obviously running.** `httpx`
-honours `HTTP_PROXY` / `HTTPS_PROXY`, so a proxy that does not exclude loopback
-will intercept `http://127.0.0.1:11434/v1`. Add `127.0.0.1` and `localhost` to
-`NO_PROXY`.
+**A local endpoint that is obviously running reports as unreachable, or is slow.**
+This is the one to know about on Windows. `httpx` resolves proxies through
+`urllib`, which falls back to the **registry** when `HTTP_PROXY` is unset — and
+then uses that proxy *without* the registry's own `ProxyOverride` bypass list. So
+with Clash (or anything else that enables the Windows system proxy) running, a
+request to `127.0.0.1` is handed to the proxy even though the bypass list says
+`localhost;127.*`. Measured on this machine: `ProxyEnable=1`,
+`ProxyServer=127.0.0.1:7897`, `ProxyOverride` includes `localhost;127.*`, no
+`HTTP_PROXY` set — and every loopback call paid ~1.5 s.
+
+This pack handles it: a request whose host is loopback (including `0.0.0.0`) sets
+`trust_env=False`, so it never goes through a proxy. LAN addresses are left alone,
+since those may legitimately need one. If you write your own client against a
+local server, `NO_PROXY=127.0.0.1,localhost` has the same effect.
 
 **A relay that redirects.** 307/308 are followed and work. 301/302/303 cannot —
 they rewrite the POST into a GET and drop the body, so the error says so and
@@ -164,12 +183,13 @@ requires a ComfyUI **restart**, not a page refresh.
 E:\ComfyUI\.venv\Scripts\python.exe E:\ComfyUI\custom_nodes\ComfyUI-LLMApi\_selftest.py
 ```
 
-No ComfyUI server and no network required. 383 checks: the suite compiles every
+No ComfyUI server and no network required. 450 checks: the suite compiles every
 module, loads the pack the way ComfyUI's loader does, asserts each node's schema
-and its Chinese translations match key-for-key, exercises skill discovery against
-throwaway `SKILL.md` files, and drives both request/response paths against a
-throwaway `http.server` on loopback — including the wire format of every request,
-both auth styles, all the reasoning-field variants, and every error branch.
+and its Chinese translations match key-for-key, exercises skill discovery and
+reference inlining against throwaway `SKILL.md` trees, and drives both
+request/response paths against a throwaway `http.server` on loopback — including
+the wire format of every request, both auth styles, all the reasoning-field
+variants, and every error branch.
 
 Submitting over `/prompt` differs from clicking Run: **only `prompt` and `model`
 are required**, and ComfyUI fills every other input from the schema defaults.
@@ -190,7 +210,7 @@ ComfyUI-LLMApi/
 │   ├── _transport.py        shared HTTP: retry, timeout, redirect handling
 │   ├── _media.py            image -> payload, reasoning extraction
 │   └── _skills.py           SKILL.md discovery and loading
-├── skills/                  bundled Agent Skills (standard format, portable)
+├── skills/                  MiniMax's official H3 Agent Skills (third-party, see NOTICE.md)
 ├── locales/zh/              node and widget translations
 ├── docs/                    per-node reference
 └── _selftest.py             offline verification

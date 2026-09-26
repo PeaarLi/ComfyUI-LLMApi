@@ -16,17 +16,23 @@ still exposes the same ``_post_chat`` it always did.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import json
 from typing import Any, Callable
+from urllib.parse import urlparse
 
 import httpx
 
 __all__ = [
     "_RETRYABLE_STATUS",
+    "_is_loopback",
     "_post_json",
     "_redirect_note",
     "_snippet",
 ]
+
+# Hostnames that mean "this machine" but are not IP literals.
+_LOOPBACK_NAMES = frozenset({"localhost", "localhost.localdomain"})
 
 # Enough of a bad response body to diagnose the problem without dumping a
 # megabyte of HTML error page into ComfyUI's log and error box.
@@ -41,6 +47,35 @@ _RETRY_BASE_DELAY = 1.0
 # Redirects that instruct clients to re-issue the request as a GET, dropping the
 # body (RFC 9110). 307/308 are deliberately absent: they preserve method and body.
 _METHOD_REWRITING_STATUS = frozenset({301, 302, 303})
+
+
+def _is_loopback(url: str) -> bool:
+    """Whether ``url`` targets this machine.
+
+    Used to decide whether to let httpx honour ambient proxy settings, and the
+    reason is not hypothetical. On Windows, httpx resolves proxies through
+    ``urllib.request.getproxies()``, which falls back to the registry when no
+    ``HTTP_PROXY`` is set -- and httpx then uses that proxy **without** the
+    registry's own ``ProxyOverride`` bypass list. So with Clash (or any tool that
+    enables the Windows system proxy) running, a request to ``127.0.0.1`` is
+    handed to the proxy even though the bypass list says ``localhost;127.*``.
+
+    The symptom is nasty because it is not a clean failure: with the proxy up,
+    every local call pays its latency; with the proxy down but the registry still
+    set, a plainly-running local server reports as unreachable.
+    """
+    host = urlparse(url).hostname or ""
+    if not host:
+        return False
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return host.lower() in _LOOPBACK_NAMES
+    # is_unspecified covers 0.0.0.0 and ::, which the ipaddress module does not call
+    # loopback. As a *destination* they mean this machine -- 0.0.0.0:8000 is a
+    # common way to write "the server I just started" -- and no remote host is ever
+    # 0.0.0.0, so treating them as local is both correct and safe.
+    return address.is_loopback or address.is_unspecified
 
 
 def _snippet(text: str, limit: int = _SNIPPET_CHARS) -> str:
@@ -96,9 +131,16 @@ async def _post_json(
     attempts = max_retries + 1
     last_error: str | None = None
 
+    client_kwargs: dict[str, Any] = {"timeout": timeout, "follow_redirects": True}
+    if _is_loopback(url):
+        # Never proxy a request to this machine -- see _is_loopback. trust_env also
+        # switches off env-provided CA bundles, which is irrelevant for a loopback
+        # call and is the price of being able to turn the proxy off per request.
+        client_kwargs["trust_env"] = False
+
     for attempt in range(attempts):
         try:
-            async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+            async with httpx.AsyncClient(**client_kwargs) as client:
                 response = await client.post(url, json=payload, headers=headers)
         except httpx.TimeoutException as exc:
             last_error = (

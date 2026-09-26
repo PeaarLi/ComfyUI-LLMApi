@@ -80,6 +80,7 @@ NODE_EXPECTATIONS: dict[str, dict] = {
             "anthropic_version",
             "system_prompt",
             "skill",
+            "inline_references",
             "images",
             "reasoning_trace",
             "native_skills",
@@ -505,6 +506,10 @@ def section_url() -> None:
 
 class _StubServer(ThreadingHTTPServer):
     daemon_threads = True
+    # Do not join handler threads at shutdown. The timeout tests leave a handler
+    # sleeping for several seconds on purpose, and joining it would make the suite
+    # wait for exactly the delay the test is proving the client ignores.
+    block_on_close = False
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -850,14 +855,24 @@ def section_http(node_cls, node_module) -> None:
             check("refusal raises", False, "no exception raised")
 
         # --- timeout ----------------------------------------------------------- #
-        server.script([(200, {"choices": [{"message": {"content": "too late"}}]}, 1.5)])
+        # The server delay is far larger than the client timeout and the threshold
+        # is correspondingly loose, on purpose. The property under test is "did not
+        # wait for the response"; a threshold tight enough to be interesting would
+        # instead be measuring this machine's ambient latency, which on Windows can
+        # include a system proxy (httpx reads one from the registry). A loose bound
+        # separates the two cleanly: waiting for the answer would mean >= 8s.
+        server.script([(200, {"choices": [{"message": {"content": "too late"}}]}, 8.0)])
         started = time.monotonic()
         try:
             run(timeout=0.4)
         except ValueError as exc:
             elapsed = time.monotonic() - started
             check("timeout raises", "超时" in str(exc), f"got {exc}")
-            check("timeout does not wait for the full server delay", elapsed < 1.4, f"took {elapsed:.2f}s")
+            check(
+                "timeout does not wait for the full server delay",
+                elapsed < 6.0,
+                f"took {elapsed:.2f}s against an 8s server delay",
+            )
         else:
             check("timeout raises", False, "no exception raised")
 
@@ -905,11 +920,18 @@ def section_skills() -> None:
     for skill in bundled:
         check(f"{skill.name}: manifest name matches its directory", skill.manifest.parent.name == skill.name)
         check(f"{skill.name}: description is non-empty", bool(skill.description.strip()))
-        body = skills._load_skill_body(skill.name)
+        body = skills._load_skill_body(skill.name, inline_references=False)
         check(f"{skill.name}: body loads", bool(body.strip()))
         check(f"{skill.name}: frontmatter is stripped from the body", not body.lstrip().startswith("---"))
         check(f"{skill.name}: body keeps its heading", body.lstrip().startswith("#"))
 
+    # The upstream skills/ ships a README.md next to the skill directories. It must
+    # not be mistaken for a skill, and neither must anything else loose in there.
+    check(
+        "a loose file in skills/ is not treated as a skill",
+        not any(skill.name.endswith(".md") for skill in bundled),
+        f"got {[s.name for s in bundled]}",
+    )
     check("the none sentinel loads nothing", skills._load_skill_body(skills._NO_SKILL) == "")
     check("an empty name loads nothing", skills._load_skill_body("") == "")
     try:
@@ -917,9 +939,54 @@ def section_skills() -> None:
     except ValueError as exc:
         message = str(exc)
         check("an unknown skill raises", "no-such-skill" in message, f"got {message}")
-        check("...and lists what is available", "image-prompt-enhancer" in message, f"got {message}")
+        check("...and lists what is available", bundled[0].name in message, f"got {message}")
     else:
         check("an unknown skill raises", False, "no exception raised")
+
+    section("skill references inlining")
+    # The reason this matters: a router-style skill's body says "read
+    # references/x.txt and follow it", which a single-request node cannot do. If the
+    # references are not inlined the model is told to read a file it cannot reach.
+    scratch = Path(tempfile.mkdtemp(prefix="llmapi-skill-refs-"))
+    try:
+        skill_dir = scratch / "router"
+        (skill_dir / "references" / "nested").mkdir(parents=True)
+        (skill_dir / "scripts").mkdir()
+        (skill_dir / "assets").mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: router\ndescription: Sends you to a reference file.\n---\n\n"
+            "# Router\n\nRead `references/guide.txt` and follow it.\n",
+            encoding="utf-8",
+        )
+        (skill_dir / "references" / "guide.txt").write_text("GUIDE-CONTENT", encoding="utf-8")
+        (skill_dir / "references" / "nested" / "deep.md").write_text("DEEP-CONTENT", encoding="utf-8")
+        (skill_dir / "scripts" / "run.sh").write_text("SCRIPT-CONTENT", encoding="utf-8")
+        (skill_dir / "assets" / "template.md").write_text("ASSET-CONTENT", encoding="utf-8")
+
+        inlined = skills._load_skill_body("router", scratch)
+        check("the body is still first", inlined.startswith("# Router"), f"got {inlined[:40]!r}")
+        check("a reference file is inlined", "GUIDE-CONTENT" in inlined, f"got {inlined[-200:]!r}")
+        check(
+            "each inlined block is labelled with its path",
+            "## Reference: references/guide.txt" in inlined,
+            "the body refers to files by name, so the label is what maps instruction to content",
+        )
+        check("nested references are inlined too", "DEEP-CONTENT" in inlined, f"got {inlined[-200:]!r}")
+        check("scripts are NOT inlined", "SCRIPT-CONTENT" not in inlined, "code to execute is not instruction text")
+        check("assets are NOT inlined", "ASSET-CONTENT" not in inlined, "output templates are not instruction text")
+        check(
+            "references sort deterministically",
+            inlined.index("GUIDE-CONTENT") < inlined.index("DEEP-CONTENT")
+            or inlined.index("references/guide.txt") < inlined.index("references/nested/deep.md"),
+            "an unordered walk would change the prompt between runs and break endpoint-side caching",
+        )
+
+        plain = skills._load_skill_body("router", scratch, inline_references=False)
+        check("inline_references=False sends the body alone", plain == "# Router\n\nRead `references/guide.txt` and follow it.", f"got {plain!r}")
+
+        check("_reference_files finds both reference files", len(skills._reference_files(skill_dir)) == 2)
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
 
     # The failure modes, each in its own throwaway directory. These are the cases a
     # user hits by hand-editing a SKILL.md, and the difference between "skipped
@@ -974,6 +1041,45 @@ def section_skills() -> None:
         )
     finally:
         shutil.rmtree(scratch, ignore_errors=True)
+
+
+def section_transport() -> None:
+    section("proxy handling for loopback")
+    transport = importlib.import_module(f"{PACK_NAME}.nodes._transport")
+
+    # A loopback target must not be handed to a proxy. On Windows, httpx resolves
+    # proxies via urllib, which falls back to the registry when HTTP_PROXY is unset,
+    # and then ignores the registry's own bypass list -- so with any system proxy
+    # enabled (Clash and friends) local requests go through it. Findings on this
+    # machine: ProxyEnable=1, ProxyServer=127.0.0.1:7897, ProxyOverride includes
+    # localhost;127.*.
+    loopback = [
+        "http://127.0.0.1:11434/v1",
+        "http://127.0.0.1/v1",
+        "http://127.5.5.5:8000/v1",  # anywhere in 127.0.0.0/8
+        "http://localhost:8000/v1",
+        "http://LOCALHOST:8000/v1",
+        "http://localhost.localdomain/v1",
+        "http://[::1]:8080/v1",
+        "http://0.0.0.0:8000/v1",  # unspecified, not loopback, but means this machine
+        "http://[::]:8000/v1",
+    ]
+    for url in loopback:
+        check(f"loopback: {url}", transport._is_loopback(url), "should bypass any proxy")
+
+    # A LAN address is not loopback: it may legitimately need a proxy, and it is
+    # not this machine, so the node should keep honouring the environment.
+    remote = [
+        "https://api.openai.com/v1",
+        "https://api.anthropic.com",
+        "http://192.168.1.50:8000/v1",
+        "http://10.0.0.5:8000/v1",
+        "https://relay.example.com/v1",
+        "",
+        "not a url",
+    ]
+    for url in remote:
+        check(f"not loopback: {url!r}", not transport._is_loopback(url), "should keep honouring ambient proxies")
 
 
 def section_anthropic_url() -> None:
@@ -1268,12 +1374,42 @@ def section_anthropic_http(node_cls) -> None:
             check("a 401 hints at the auth style", False, "no exception raised")
 
         # --- local skill injection --------------------------------------------- #
+        # Derived from what is actually bundled rather than a hardcoded name, so
+        # the suite survives the bundled set changing.
+        skills_module = importlib.import_module(f"{PACK_NAME}.nodes._skills")
+        anthropic_module = importlib.import_module(f"{PACK_NAME}.nodes.anthropic")
+        bundled = anthropic_module.SKILLS
+        first_skill = bundled[0].name
+        plain_body = skills_module._load_skill_body(first_skill, inline_references=False)
+
         server.script([(200, reply(text("ok")), 0.0)])
-        run(skill="image-prompt-enhancer", system_prompt="USER INSTRUCTIONS")
+        run(skill=first_skill, system_prompt="USER INSTRUCTIONS")
         system = server.requests[-1]["body"].get("system", "")
-        check("the skill body reaches the system parameter", "Image Prompt Enhancer" in system, f"got {system[:80]!r}")
-        check("...before the user's own instructions", system.index("Image Prompt Enhancer") < system.index("USER"))
+        check("the skill body reaches the system parameter", system.startswith(plain_body), f"got {system[:80]!r}")
+        check("...before the user's own instructions", system.index(plain_body) < system.index("USER INSTRUCTIONS"))
         check("the user's instructions are still there", system.endswith("USER INSTRUCTIONS"), f"got {system[-60:]!r}")
+
+        # Inlining, against a real bundled skill that has references/.
+        with_references = next((skill for skill in bundled if skills_module._reference_files(skill.directory)), None)
+        if check("a bundled skill ships references/ to exercise inlining", with_references is not None):
+            server.script([(200, reply(text("ok")), 0.0)])
+            run(skill=with_references.name)
+            inlined = server.requests[-1]["body"].get("system", "")
+            check("references are inlined by default", "## Reference: references/" in inlined, f"got {inlined[:120]!r}")
+            check(
+                "inlining adds real content",
+                len(inlined) > len(skills_module._load_skill_body(with_references.name, inline_references=False)),
+                "the system prompt should be longer with the references flattened in",
+            )
+
+            server.script([(200, reply(text("ok")), 0.0)])
+            run(skill=with_references.name, inline_references=False)
+            check(
+                "inline_references=False sends the body alone",
+                server.requests[-1]["body"].get("system")
+                == skills_module._load_skill_body(with_references.name, inline_references=False),
+                "got a system prompt with extra content",
+            )
 
         server.script([(200, reply(text("ok")), 0.0)])
         run(skill="(none)", system_prompt="USER INSTRUCTIONS")
@@ -1382,6 +1518,7 @@ def main() -> int:
     section_locale(nodes)
     section_packaging()
     section_skills()
+    section_transport()
     section_url()
     section_http(nodes["LlmApiChat"], importlib.import_module(f"{PACK_NAME}.nodes.chat"))
     section_anthropic_url()
