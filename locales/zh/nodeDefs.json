@@ -1,0 +1,62 @@
+{
+  "LlmApiChat": {
+    "display_name": "LLM API 对话",
+    "description": "用你自己的 BaseURL 和 API KEY，直连任何 OpenAI 兼容的对话端点：OpenAI、DeepSeek、Moonshot、智谱、通义、本地 vLLM/Ollama，以及各种中转站。支持可选的多张参考图（视觉模型）、可选的 system prompt；当模型返回思考过程时，会单独从一个端口输出。",
+    "inputs": {
+      "prompt": {
+        "name": "提示词",
+        "tooltip": "用户消息正文。接了图的时候可以留空（例如「描述这张图」），但提示词和图片不能同时为空。"
+      },
+      "model": {
+        "name": "模型",
+        "tooltip": "模型名，必须和端点认识的写法一致，例如 gpt-4o-mini、deepseek-chat、moonshot-v1-8k、qwen-vl-max、llama3.2-vision。这里刻意用文本框而不是下拉框：本节点要连的端点，其模型列表无法预先枚举。"
+      },
+      "base_url": {
+        "name": "BaseURL",
+        "tooltip": "端点前缀。除非已经带了，否则会自动在末尾接上 '/chat/completions'，所以填到版本号为止即可：https://api.openai.com/v1、https://api.deepseek.com/v1、http://127.0.0.1:11434/v1。注意：不会替你猜补 '/v1' —— 各家中转站的路径前缀不一样，猜错只会得到一个更难排查的 404。"
+      },
+      "api_key": {
+        "name": "API KEY",
+        "tooltip": "端点的 Bearer 令牌。本地服务（Ollama、vLLM、LM Studio）不需要密钥时留空即可 —— 留空时完全不会发送 Authorization 头。⚠️ 警告：ComfyUI 没有密码类型的控件，这个值会以明文存进 workflow JSON 并显示在界面上。含有密钥的 workflow 不要分享、不要提交到仓库。"
+      },
+      "system_prompt": {
+        "name": "系统提示词",
+        "tooltip": "决定模型行为的基础指令。留空则完全不发送 system 消息。"
+      },
+      "images": {
+        "name": "参考图",
+        "tooltip": "可选的参考图，供视觉模型使用，最多 8 张。图片按槽位顺序送给模型，所以「把 image_1 和 image_2 对比一下」是有效的。每张会先缩放到不超过 1280x1280，再以 PNG data URI 内联进请求体；批量输入会按帧展开，一帧算一张。注意模型本身必须支持图片 —— 纯文本模型会直接拒绝这个请求。"
+      },
+      "seed": {
+        "name": "种子",
+        "tooltip": "只有大于 0 时才会发给端点，所以默认值等于不发送这个字段。它主要服务于 ComfyUI 这一侧：把 control_after_generate 设成 randomize 后，种子变化正是让本节点重新执行、而不是重放缓存结果的原因。"
+      },
+      "temperature": {
+        "name": "温度",
+        "tooltip": "采样温度。默认值 -1 表示完全不发送这个字段、由端点自己决定 —— 因为 0 是一个合法的温度（贪心解码），不能拿来当「不发送」的标记。部分推理模型会直接拒绝这个字段。"
+      },
+      "max_tokens": {
+        "name": "最大 token 数",
+        "tooltip": "生成 token 数的上限。默认 0 表示不发送该字段、交给端点决定。需要长输出时调大 —— 推理模型会在写出答案之前，先在思考过程上花掉相当一部分预算。"
+      },
+      "timeout": {
+        "name": "超时",
+        "tooltip": "等待响应的秒数。这是整个请求的上限，必须能覆盖模型的全部生成时间 —— 聊天场景下 300 秒很宽裕，但很长的思考链或大批量图片可能需要更多。"
+      },
+      "max_retries": {
+        "name": "最大重试次数",
+        "tooltip": "在连接失败、超时，或遇到瞬时状态码（429、5xx）后的重试次数，采用指数退避。0 表示只发一次、不重试。配置类错误（401、404、422）永远不会重试 —— 它们重发多少次结果都一样。"
+      }
+    },
+    "outputs": {
+      "0": {
+        "name": "文本",
+        "tooltip": "模型的回复正文。如果它只产出了思考过程，这里是空字符串。"
+      },
+      "1": {
+        "name": "思考过程",
+        "tooltip": "模型的思考内容，前提是端点会返回它。不会「出声思考」的模型这里是空字符串，所以这个端口可以放心接线。"
+      }
+    }
+  }
+}

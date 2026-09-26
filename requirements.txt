@@ -1,0 +1,16 @@
+# Only packages ComfyUI does NOT already ship are listed here -- and this pack
+# lists none. It needs httpx for HTTP plus torch/PIL/numpy, and all four are
+# already present in any ComfyUI venv.
+#
+# Note that httpx is a TRANSITIVE dependency, not a direct one: ComfyUI's own
+# requirements.txt lists aiohttp, not httpx, which arrives via
+# transformers -> huggingface_hub -> httpx. That is a real (if remote) fragility
+# -- if that chain were ever dropped, this pack would fail to import, and an
+# import-time failure makes a custom node pack vanish with only a log warning.
+# _selftest.py imports httpx explicitly so the failure surfaces as a clear error
+# instead. Do not "fix" it by pinning httpx here: ComfyUI-Manager was removed
+# from this machine because its startup installer ran `uv pip install` while
+# ComfyUI held Pillow's _imaging .pyd memory-mapped, so uv could not unlink the
+# file and aborted after deleting Pillow's pure-Python modules. Every entry
+# added here puts that class of failure back on the table. Keep this file
+# comment-only -- _selftest.py asserts it stays that way.

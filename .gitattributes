@@ -1,0 +1,17 @@
+# Store text as LF in the repository and in the working copy. This pack is pure
+# Python/JSON/Markdown, and ComfyUI servers are overwhelmingly Linux, so CRLF
+# translations would only add noise (and git warns about them on every add).
+#
+# This file is load-bearing on Windows: the system-level config here sets
+# core.autocrlf=true, which would otherwise rewrite every LF file to CRLF on
+# checkout and emit a warning on every add.
+* text=auto eol=lf
+
+# Binary assets, should any be added later. The skills/ directory makes a .png
+# or .safetensors plausible (Agent Skills bundles may ship assets/), so these
+# rules are not speculative.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.safetensors binary

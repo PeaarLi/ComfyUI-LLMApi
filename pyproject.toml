@@ -1,0 +1,32 @@
+[project]
+name = "llm-api-chat"
+version = "0.1.0"
+description = "Call any OpenAI-compatible chat endpoint from ComfyUI with your own base URL and API key, with optional vision input and reasoning output."
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+# Single source of truth: ComfyUI Manager installs requirements.txt, and the
+# registry build reads the same file.
+dynamic = ["dependencies"]
+classifiers = [
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+# TODO: replace with the real public repository URL before publishing.
+Repository = "https://github.com/your-github-user/ComfyUI-LLMApi"
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.comfy]
+# TODO: replace with the publisher id from the Comfy Registry website
+# (usually your GitHub username) before running `comfy node publish`.
+PublisherId = "your-publisher-id"
+DisplayName = "LLM API Chat"
+Icon = ""
+# 0.37.0 is the only version this pack has been run against, so the floor states
+# the verified fact rather than a guessed minimum. The newest capability used
+# here is io.Autogrow (the image slots), whose nested widget translation was
+# checked against comfyui-frontend-package 1.53.6. Lower bounds have NOT been
+# tested.
+requires-comfyui = ">=0.37.0"
