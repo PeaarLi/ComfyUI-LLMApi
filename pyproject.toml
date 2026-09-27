@@ -12,7 +12,7 @@ classifiers = [
 ]
 
 [project.urls]
-Repository = "https://github.com/PearLi/ComfyUI-LLMApi"
+Repository = "https://github.com/PeaarLi/ComfyUI-LLMApi"
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
