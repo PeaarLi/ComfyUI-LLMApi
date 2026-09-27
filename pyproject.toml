@@ -12,16 +12,13 @@ classifiers = [
 ]
 
 [project.urls]
-# TODO: replace with the real public repository URL before publishing.
-Repository = "https://github.com/your-github-user/ComfyUI-LLMApi"
+Repository = "https://github.com/PearLi/ComfyUI-LLMApi"
 
 [tool.setuptools.dynamic]
 dependencies = { file = ["requirements.txt"] }
 
 [tool.comfy]
-# TODO: replace with the publisher id from the Comfy Registry website
-# (usually your GitHub username) before running `comfy node publish`.
-PublisherId = "your-publisher-id"
+PublisherId = "PearLi"
 DisplayName = "LLM API Chat"
 Icon = ""
 # 0.37.0 is the only version this pack has been run against, so the floor states
