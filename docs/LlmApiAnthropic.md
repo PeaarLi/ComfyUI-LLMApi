@@ -24,7 +24,7 @@ max_retries
 | `auth_style` | COMBO (advanced) | `x-api-key` | `x-api-key` / `Authorization: Bearer` | Which header carries the key. See [Auth](#auth). |
 | `anthropic_version` | STRING (advanced) | `2023-06-01` | — | Blank omits the `anthropic-version` header. |
 | `system_prompt` | STRING (multiline) | `""` | — | Sent as the top-level `system` parameter, after the selected skill's text. |
-| `skill` | COMBO | `(none)` | `(none)` + bundled skills | A local `SKILL.md`, injected into `system` with its `references/`. See [Skills](#skills). |
+| `skill` | COMBO | `(none)` | `(none)` + local skills | A local `SKILL.md`, injected into `system` with its `references/`. See [Skills](#skills). |
 | `inline_references` | BOOLEAN (advanced) | `True` | — | Append the skill's `references/` files. See [Skills](#skills). |
 | `images` | AUTOGROW(IMAGE) | no slots | up to 8 | Sent as Anthropic base64 image blocks. A batch expands one image per frame. |
 | `reasoning_trace` | BOOLEAN (advanced) | `True` | — | Sets `thinking.display` to `summarized`. |
@@ -114,26 +114,27 @@ Claude Code, Codex, Gemini CLI and Copilot CLI. Copying `skills/<name>/` to
 `~/.agents/skills/` is all it takes — that directory is the cross-runtime alias
 those tools share.
 
-#### The bundled set
+#### No skills are bundled
 
-Nine skills, copied verbatim from
-<https://github.com/MiniMax-AI/MiniMax-H3/tree/main/skills> at commit
-`d21241f0a4b3acbb34c97dae47fa417b7065e438`: `h3-prompt-writing` plus eight
-video-generation planners. `h3-prompt-writing` is the one MiniMax itself treats as
-*the* skill — its repo also installs it into `.agents/skills/` and `.claude/skills/`.
+The pack ships no `skills/` directory — populate it yourself, one folder per
+skill, and restart ComfyUI so the combo is rebuilt. A ready-made set is MiniMax's
+official H3 Agent Skills at
+<https://github.com/MiniMax-AI/MiniMax-H3/tree/main/skills>: `h3-prompt-writing`
+(the one MiniMax itself treats as *the* skill — its repo also installs it into
+`.agents/skills/` and `.claude/skills/`) plus eight video-generation planners.
 
-> **Licence.** This directory is **not** covered by the pack's MIT licence. It is
+> **Licence.** That set is **not** covered by the pack's MIT licence. It is
 > third-party content under the MiniMax H3 Community License Agreement, which
 > grants rights **solely within the Applicable Territory** — worldwide excluding
 > the European Union, the United Kingdom, the Republic of Korea and the United
-> States of America — and is additionally subject to an Acceptable Use Policy. Read
-> [skills/NOTICE.md](../skills/NOTICE.md) before redistributing. Deleting `skills/`
-> costs you only the dropdown entries; the nodes work without it.
+> States of America — and is additionally subject to an Acceptable Use Policy.
+> That licence is why the pack links to the set instead of shipping it.
 
-Every skill except `h3-prompt-writing` also ships a `SKILL.cn.md`, a Chinese
-translation of the same instructions. This node reads `SKILL.md` — the filename the
-standard mandates and the one every other runtime reads — so the Chinese variants
-sit unused unless you swap them in or copy the skill to `~/.agents/skills/`.
+Every MiniMax skill except `h3-prompt-writing` also ships a `SKILL.cn.md`, a
+Chinese translation of the same instructions. This node reads `SKILL.md` — the
+filename the standard mandates and the one every other runtime reads — so the
+Chinese variants sit unused unless you swap them in or copy the skill to
+`~/.agents/skills/`.
 
 ### Native (`native_skills`)
 

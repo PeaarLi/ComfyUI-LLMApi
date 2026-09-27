@@ -41,14 +41,16 @@ interchangeable:
 
 Inlining the `references/` files is not a nicety: many skills are *routers* whose
 body says "read `references/x.txt` and follow it", which a single-request node
-cannot do. Nine skills ship, all of them **MiniMax's official H3 Agent Skills**
-copied verbatim from <https://github.com/MiniMax-AI/MiniMax-H3/tree/main/skills>
-— `h3-prompt-writing` plus eight video-generation planners.
+cannot do.
 
-> **Licence:** that directory is **not** MIT. It is third-party content under the
-> MiniMax H3 Community License, which is territory-scoped (it excludes the EU, UK,
-> South Korea and the USA). See [skills/NOTICE.md](skills/NOTICE.md) before
-> redistributing. Deleting `skills/` costs you only the dropdown entries.
+**No skills are bundled** — the dropdown reads this pack's `skills/` directory,
+which you populate yourself (one folder per skill); leave it absent and the
+dropdown is just `(none)`. A ready-made set is **MiniMax's official H3 Agent
+Skills** (`h3-prompt-writing` plus eight video-generation planners), at
+<https://github.com/MiniMax-AI/MiniMax-H3/tree/main/skills>. Note that set is
+third-party content under the MiniMax H3 Community License, which is
+territory-scoped (it excludes the EU, UK, South Korea and the USA) — that licence
+is why this pack links to the set instead of shipping it.
 
 The files follow the open **Agent Skills** standard, so they are portable: copy
 `skills/<name>/` to `~/.agents/skills/` and Claude Code, Codex, Gemini CLI and
@@ -180,10 +182,14 @@ requires a ComfyUI **restart**, not a page refresh.
 ## Verifying
 
 ```
-E:\ComfyUI\.venv\Scripts\python.exe E:\ComfyUI\custom_nodes\ComfyUI-LLMApi\_selftest.py
+python _selftest.py
 ```
 
-No ComfyUI server and no network required. 450 checks: the suite compiles every
+Run it with ComfyUI's own python (its venv), from the pack directory — the suite
+loads the pack the way ComfyUI's loader does, so it needs ComfyUI's importable
+dependencies. dependencies. No ComfyUI server and no network required. 393 checks (plus a few
+dozen per-skill ones if you have a populated `skills/` directory): the suite
+compiles every
 module, loads the pack the way ComfyUI's loader does, asserts each node's schema
 and its Chinese translations match key-for-key, exercises skill discovery and
 reference inlining against throwaway `SKILL.md` trees, and drives both
@@ -210,7 +216,7 @@ ComfyUI-LLMApi/
 │   ├── _transport.py        shared HTTP: retry, timeout, redirect handling
 │   ├── _media.py            image -> payload, reasoning extraction
 │   └── _skills.py           SKILL.md discovery and loading
-├── skills/                  MiniMax's official H3 Agent Skills (third-party, see NOTICE.md)
+├── skills/                  (optional, not shipped) your local skills, one folder each
 ├── locales/zh/              node and widget translations
 ├── docs/                    per-node reference
 └── _selftest.py             offline verification

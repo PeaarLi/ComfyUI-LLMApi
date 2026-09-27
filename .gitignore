@@ -13,3 +13,7 @@ env/
 # Local scratch
 *.log
 _selftest_out/
+
+# skills/ stays local-only: the MiniMax H3 set is third-party content under a
+# territory-scoped licence, so the public repo must not redistribute it.
+skills/

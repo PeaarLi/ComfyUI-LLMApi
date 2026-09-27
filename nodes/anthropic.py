@@ -91,13 +91,13 @@ SKILLS = _discover_skills()
 SKILL_OPTIONS = [_NO_SKILL] + [skill.name for skill in SKILLS]
 
 # Enough of each description to choose by, without the tooltip becoming a wall of
-# text. The bundled set is nine skills whose descriptions run to several hundred
-# characters each; untruncated, that is a ~3 KB hover.
+# text. MiniMax's nine-skill H3 set, for example, has descriptions of several
+# hundred characters each; untruncated, that is a ~3 KB hover.
 _LISTING_DESCRIPTION_CHARS = 90
 
 
 def _skill_listing() -> str:
-    """One line naming every bundled skill, for the combo's tooltip."""
+    """One line naming every discovered skill, for the combo's tooltip."""
     if not SKILLS:
         return "（包内没有 skill / no skills bundled）"
     parts = []
@@ -208,7 +208,7 @@ class LlmApiAnthropic(io.ComfyNode):
                     default=_NO_SKILL,
                     tooltip=(
                         "A SKILL.md from this pack's skills/ directory, injected into the system parameter. "
-                        f"Bundled -- {skill_listing}. "
+                        f"Found -- {skill_listing}. "
                         "Works on any endpoint including relays, because it is only text. Its references/ files "
                         "are inlined too, which is what makes a router-style skill work -- but the model still "
                         "cannot execute a skill's scripts/. The list is scanned at startup, so a skill directory "

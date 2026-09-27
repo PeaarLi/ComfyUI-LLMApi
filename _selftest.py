@@ -273,11 +273,13 @@ def section_defaults() -> None:
         anthropic.SKILL_OPTIONS[:1] == ["(none)"],
         f"got {anthropic.SKILL_OPTIONS}",
     )
-    check(
-        "anthropic bundled skills were discovered",
-        len(anthropic.SKILLS) >= 1,
-        f"got {[s.name for s in anthropic.SKILLS]} - is skills/ populated and committed?",
-    )
+    # skills/ is not shipped (licensing), so a fresh clone discovers nothing.
+    if (PACK_DIR / "skills").is_dir():
+        check(
+            "anthropic local skills were discovered",
+            len(anthropic.SKILLS) >= 1,
+            f"got {[s.name for s in anthropic.SKILLS]} - is skills/ populated?",
+        )
 
 
 def section_autogrow(nodes: dict) -> None:
@@ -914,24 +916,26 @@ def section_skills() -> None:
     skills = importlib.import_module(f"{PACK_NAME}.nodes._skills")
 
     root = skills._skills_root()
-    check("skills/ directory exists", root.is_dir(), f"looked in {root}")
     bundled = skills._discover_skills()
-    check("bundled skills were discovered", len(bundled) >= 1, f"got {[s.name for s in bundled]}")
-    for skill in bundled:
-        check(f"{skill.name}: manifest name matches its directory", skill.manifest.parent.name == skill.name)
-        check(f"{skill.name}: description is non-empty", bool(skill.description.strip()))
-        body = skills._load_skill_body(skill.name, inline_references=False)
-        check(f"{skill.name}: body loads", bool(body.strip()))
-        check(f"{skill.name}: frontmatter is stripped from the body", not body.lstrip().startswith("---"))
-        check(f"{skill.name}: body keeps its heading", body.lstrip().startswith("#"))
+    # The pack ships no skills/ of its own (licensing), so a fresh clone skips
+    # this block; locally it runs against whatever skills/ contains.
+    if root.is_dir():
+        check("local skills were discovered", len(bundled) >= 1, f"got {[s.name for s in bundled]}")
+        for skill in bundled:
+            check(f"{skill.name}: manifest name matches its directory", skill.manifest.parent.name == skill.name)
+            check(f"{skill.name}: description is non-empty", bool(skill.description.strip()))
+            body = skills._load_skill_body(skill.name, inline_references=False)
+            check(f"{skill.name}: body loads", bool(body.strip()))
+            check(f"{skill.name}: frontmatter is stripped from the body", not body.lstrip().startswith("---"))
+            check(f"{skill.name}: body keeps its heading", body.lstrip().startswith("#"))
 
-    # The upstream skills/ ships a README.md next to the skill directories. It must
-    # not be mistaken for a skill, and neither must anything else loose in there.
-    check(
-        "a loose file in skills/ is not treated as a skill",
-        not any(skill.name.endswith(".md") for skill in bundled),
-        f"got {[s.name for s in bundled]}",
-    )
+        # A README.md next to the skill directories is not a skill, and neither
+        # is anything else loose in there.
+        check(
+            "a loose file in skills/ is not treated as a skill",
+            not any(skill.name.endswith(".md") for skill in bundled),
+            f"got {[s.name for s in bundled]}",
+        )
     check("the none sentinel loads nothing", skills._load_skill_body(skills._NO_SKILL) == "")
     check("an empty name loads nothing", skills._load_skill_body("") == "")
     try:
@@ -939,7 +943,8 @@ def section_skills() -> None:
     except ValueError as exc:
         message = str(exc)
         check("an unknown skill raises", "no-such-skill" in message, f"got {message}")
-        check("...and lists what is available", bundled[0].name in message, f"got {message}")
+        if bundled:
+            check("...and lists what is available", bundled[0].name in message, f"got {message}")
     else:
         check("an unknown skill raises", False, "no exception raised")
 
@@ -1374,42 +1379,44 @@ def section_anthropic_http(node_cls) -> None:
             check("a 401 hints at the auth style", False, "no exception raised")
 
         # --- local skill injection --------------------------------------------- #
-        # Derived from what is actually bundled rather than a hardcoded name, so
-        # the suite survives the bundled set changing.
+        # Derived from whatever skills/ contains rather than a hardcoded name, so
+        # the suite survives the set changing. A fresh clone ships no skills/ at
+        # all (licensing), in which case this block is skipped.
         skills_module = importlib.import_module(f"{PACK_NAME}.nodes._skills")
         anthropic_module = importlib.import_module(f"{PACK_NAME}.nodes.anthropic")
         bundled = anthropic_module.SKILLS
-        first_skill = bundled[0].name
-        plain_body = skills_module._load_skill_body(first_skill, inline_references=False)
-
-        server.script([(200, reply(text("ok")), 0.0)])
-        run(skill=first_skill, system_prompt="USER INSTRUCTIONS")
-        system = server.requests[-1]["body"].get("system", "")
-        check("the skill body reaches the system parameter", system.startswith(plain_body), f"got {system[:80]!r}")
-        check("...before the user's own instructions", system.index(plain_body) < system.index("USER INSTRUCTIONS"))
-        check("the user's instructions are still there", system.endswith("USER INSTRUCTIONS"), f"got {system[-60:]!r}")
-
-        # Inlining, against a real bundled skill that has references/.
-        with_references = next((skill for skill in bundled if skills_module._reference_files(skill.directory)), None)
-        if check("a bundled skill ships references/ to exercise inlining", with_references is not None):
-            server.script([(200, reply(text("ok")), 0.0)])
-            run(skill=with_references.name)
-            inlined = server.requests[-1]["body"].get("system", "")
-            check("references are inlined by default", "## Reference: references/" in inlined, f"got {inlined[:120]!r}")
-            check(
-                "inlining adds real content",
-                len(inlined) > len(skills_module._load_skill_body(with_references.name, inline_references=False)),
-                "the system prompt should be longer with the references flattened in",
-            )
+        if bundled:
+            first_skill = bundled[0].name
+            plain_body = skills_module._load_skill_body(first_skill, inline_references=False)
 
             server.script([(200, reply(text("ok")), 0.0)])
-            run(skill=with_references.name, inline_references=False)
-            check(
-                "inline_references=False sends the body alone",
-                server.requests[-1]["body"].get("system")
-                == skills_module._load_skill_body(with_references.name, inline_references=False),
-                "got a system prompt with extra content",
-            )
+            run(skill=first_skill, system_prompt="USER INSTRUCTIONS")
+            system = server.requests[-1]["body"].get("system", "")
+            check("the skill body reaches the system parameter", system.startswith(plain_body), f"got {system[:80]!r}")
+            check("...before the user's own instructions", system.index(plain_body) < system.index("USER INSTRUCTIONS"))
+            check("the user's instructions are still there", system.endswith("USER INSTRUCTIONS"), f"got {system[-60:]!r}")
+
+            # Inlining, against a real local skill that has references/.
+            with_references = next((skill for skill in bundled if skills_module._reference_files(skill.directory)), None)
+            if check("a local skill ships references/ to exercise inlining", with_references is not None):
+                server.script([(200, reply(text("ok")), 0.0)])
+                run(skill=with_references.name)
+                inlined = server.requests[-1]["body"].get("system", "")
+                check("references are inlined by default", "## Reference: references/" in inlined, f"got {inlined[:120]!r}")
+                check(
+                    "inlining adds real content",
+                    len(inlined) > len(skills_module._load_skill_body(with_references.name, inline_references=False)),
+                    "the system prompt should be longer with the references flattened in",
+                )
+
+                server.script([(200, reply(text("ok")), 0.0)])
+                run(skill=with_references.name, inline_references=False)
+                check(
+                    "inline_references=False sends the body alone",
+                    server.requests[-1]["body"].get("system")
+                    == skills_module._load_skill_body(with_references.name, inline_references=False),
+                    "got a system prompt with extra content",
+                )
 
         server.script([(200, reply(text("ok")), 0.0)])
         run(skill="(none)", system_prompt="USER INSTRUCTIONS")

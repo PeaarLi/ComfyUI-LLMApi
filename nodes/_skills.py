@@ -3,9 +3,9 @@
 Skills on disk follow the open Agent Skills standard: a directory per skill
 containing a ``SKILL.md`` whose YAML frontmatter carries ``name`` and
 ``description``. That is the same layout Claude Code, Codex, Gemini CLI and
-Copilot CLI read -- Codex's own spec documents exactly this shape -- so the
-files in this pack's ``skills/`` directory can be copied to ``~/.agents/skills/``
-and used by those runtimes unchanged. Following an existing standard rather than
+Copilot CLI read -- Codex's own spec documents exactly this shape -- so a
+``skills/`` directory's files can be copied to ``~/.agents/skills/`` and used by
+those runtimes unchanged. Following an existing standard rather than
 inventing a format is the whole point.
 
 Two deliberate asymmetries, both documented in the node's doc page because both
